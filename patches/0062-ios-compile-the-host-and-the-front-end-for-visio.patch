@@ -1,0 +1,251 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: miogds <miogds@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 14:54:49 +0100
+Subject: [PATCH] ios: compile the host and the front end for visionOS
+
+The visionOS SDK marks a few APIs the iOS build uses as unavailable, which
+stopped three of the host's 269 files from compiling for it:
+
+- front_ios.m: UIScreen (the scale, the size and the brightness of the
+  screen) and the scene accessory of an external display. A view's scale
+  now comes from its traits there, the brightness stays unknown as on the
+  Mac, the docked picture takes hle_vi.c's 1920x1080 default, and no TV
+  scene is registered.
+- DmGamepad.m: UIImpactFeedbackGenerator, the touch controls' tap feedback,
+  is left out.
+- nvn_mtl.m: the MetalFX temporal scaler (MTL4FXTemporalScaler). A DLSS
+  evaluation takes the bilinear stand-in the renderer already has and says
+  so once in the log.
+
+Every change is behind TARGET_OS_VISION: the iOS and the Mac build compile
+the code they did. This is the compile step only; the build scripts, the
+Swift sources and the shader libraries still target the iPhone SDK.
+
+Upstream-Status: fork-only
+Reason: visionOS is outside upstream's support matrix: the host and the iOS front end compile for its SDK
+Issue: none yet (miogds/NX2Apple, visionOS evaluation branch; to be filed before this goes to LNPANDY/NX2Apple)
+
+---
+ dm/gfx/nvn/nvn_mtl.m       | 16 +++++++++++++++-
+ dm/ios/Sources/DmGamepad.m | 17 +++++++++++++++++
+ dm/ios/Sources/front_ios.m | 35 ++++++++++++++++++++++++++++++-----
+ 3 files changed, 62 insertions(+), 6 deletions(-)
+
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index 7212a46..75504e6 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -15443,10 +15443,17 @@ static void copy_t2t(const p_copy_t2t *c) {
+ // renders a new size into the same textures as often as each frame. MetalFX's input content properties take that: the scaler's input is the textures' common size, its content scale
+ // runs from that size's (the content filling them; no less than the device's least) up to the most the device takes, and each evaluation sets its own content size. Keyed by the input's size, every new size made
+ // a scaler again (a Metal compile) and lost the history. An input whose scale falls outside the range (smaller than the device's most) makes one for its own scale, as before
++// visionOS has no MetalFX temporal scaler (its SDK marks MTL4FXTemporalScaler unavailable): DM_MFX_TEMPORAL is 0 there and every evaluation takes the bilinear stand-in (dlss_eval)
++#if defined(TARGET_OS_VISION) && TARGET_OS_VISION
++#define DM_MFX_TEMPORAL 0
++#else
++#define DM_MFX_TEMPORAL 1
++#endif
++static id<MTL4Compiler> g_dlss_comp;
++#if DM_MFX_TEMPORAL
+ typedef struct { uint64_t net, used; id<MTL4FXTemporalScaler> sc; NSUInteger key[9]; float lo, hi; int fresh; } dlss_scaler;
+ static dlss_scaler g_dlss[4];
+ static uint64_t g_dlss_use;
+-static id<MTL4Compiler> g_dlss_comp;
+ static void dlss_scaler_drop(dlss_scaler *e) { if (e->sc) defer_obj_release(e->sc); e->sc = nil; }
+ static dlss_scaler *dlss_scaler_for(const p_dlss *c, id<MTLTexture> col, id<MTLTexture> dep, id<MTLTexture> mot, id<MTLTexture> out, NSUInteger iw, NSUInteger ih) {
+     NSUInteger bw = MIN(col.width, MIN(dep.width, mot.width)), bh = MIN(col.height, MIN(dep.height, mot.height));   // the input box every texture holds
+@@ -15474,6 +15481,7 @@ static void copy_t2t(const p_copy_t2t *c) {
+               (unsigned long)iw, (unsigned long)ih, (unsigned long)out.width, (unsigned long)out.height, (unsigned long)col.pixelFormat, (unsigned long)dep.pixelFormat, (unsigned long)mot.pixelFormat, (unsigned long)out.pixelFormat);
+     return e->sc ? e : NULL;
+ }
++#endif
+ // MetalFX's Metal 4 scalers open encoders of their own with no barrier, before or after their work. Before them, in cb: an encoder that waits for the queue's earlier work and
+ // holds the queue's later work (the scaler's encoders) behind its own, a copy: from src's region at o into dst at the origin when the caller copies (the present's crop), else
+ // one word of a scratch buffer. Barriers around no work order nothing (An encoder of barriers alone orders nothing, docs/reference/rendering.md): behind an empty encoder of
+@@ -15511,13 +15519,18 @@ static void dlss_eval(const p_dlss *c) {
+     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+     // Diagnostic DM_NVN_DLSS_BILINEAR=1 (off by default): every evaluation takes the bilinear stand-in below, to tell MetalFX's part in a GPU fault or stall
+     static int bilinear = -1; if (bilinear < 0) { const char *be = getenv("DM_NVN_DLSS_BILINEAR"); bilinear = be && atoi(be); if (bilinear) MLOG("DM_NVN_DLSS_BILINEAR: DLSS drawn bilinear (diagnostic)"); }
++#if DM_MFX_TEMPORAL
+     dlss_scaler *e = dep && mot && !bilinear ? dlss_scaler_for(c, col, dep, mot, out, iw, ih) : NULL;
++#else
++    void *e = NULL; { static int once; if (!once++) MLOG("[RED] DLSS: visionOS has no MetalFX temporal scaler; scaling bilinearly"); }
++#endif
+     if (!e) {
+         NVNcopyRegion sr = {c->base[DLSS_COLOR][0], c->base[DLSS_COLOR][1], 0, (int)iw, (int)ih, 1}, dr = {c->base[DLSS_OUTPUT][0], c->base[DLSS_OUTPUT][1], 0, (int)out.width, (int)out.height, 1};
+         if (!(out.usage & MTLTextureUsageRenderTarget) && !mtl_fmt_block(out.pixelFormat) && !fmt_int_or_ds(out.pixelFormat)) out = tex_upgrade(c->tex[DLSS_OUTPUT], out, MTLTextureUsageRenderTarget, out.pixelFormat);
+         if (!copy_t2t_draw(col, out, 0, 0, 0, 0, &sr, &dr, 1, 0)) { static int once; if (!once++) MLOG("[RED] DLSS: the bilinear stand-in could not draw format %lu into format %lu", (unsigned long)col.pixelFormat, (unsigned long)out.pixelFormat); }
+         return;
+     }
++#if DM_MFX_TEMPORAL
+     id<MTL4FXTemporalScaler> sc = e->sc;
+     if ((col.usage & sc.colorTextureUsage) != sc.colorTextureUsage) col = tex_upgrade(c->tex[DLSS_COLOR], col, sc.colorTextureUsage, col.pixelFormat);
+     if ((dep.usage & sc.depthTextureUsage) != sc.depthTextureUsage) dep = tex_upgrade(c->tex[DLSS_DEPTH], dep, sc.depthTextureUsage, dep.pixelFormat);
+@@ -15550,6 +15563,7 @@ static void dlss_eval(const p_dlss *c) {
+         [sc encodeToCommandBuffer:cb];
+     });
+     if (c->tex[DLSS_BIAS]) { static int once; if (!once++) MLOG("[RED] DLSS: the game's bias mask (a reactive mask for MetalFX) is not passed on"); }
++#endif
+ }
+ 
+ // The colour channels a Metal format has, as a channel write mask: a clear whose mask covers them all writes every texel whole (FINAL FANTASY TACTICS - The Ivalice Chronicles clears an
+diff --git a/dm/ios/Sources/DmGamepad.m b/dm/ios/Sources/DmGamepad.m
+index 9860743..a8d6eda 100644
+--- a/dm/ios/Sources/DmGamepad.m
++++ b/dm/ios/Sources/DmGamepad.m
+@@ -23,6 +23,13 @@
+ #import <CoreMotion/CoreMotion.h>
+ #import <CoreText/CoreText.h>
+ #include <pthread.h>
++#include <TargetConditionals.h>
++// Tap feedback for the touch controls (UIImpactFeedbackGenerator): visionOS has none
++#if defined(TARGET_OS_VISION) && TARGET_OS_VISION
++#define DM_TOUCH_FEEDBACK 0
++#else
++#define DM_TOUCH_FEEDBACK 1
++#endif
+ #include "dm.h"
+ #include "dm_input.h"
+ #include "front.h"
+@@ -173,7 +180,9 @@ @implementation DmGamepad {
+     NSString *_padHintWords; BOOL _padHintShown;
+     unsigned _menuGen;                             // generation counter for the controller-idle menu fade timer
+     BOOL _menuOpen;                                // the in-game menu is currently presented
++#if DM_TOUCH_FEEDBACK
+     UIImpactFeedbackGenerator *_touchFeedback;       // one short feedback per touch-control press edge
++#endif
+     unsigned _hapticSticks;
+     BOOL _stickShown;                              // the left stick was held at the last refresh
+     BOOL _full, _tap;                              // the 3D layout / the Tap layout is current
+@@ -218,11 +227,13 @@ - (instancetype)initWithFrame:(CGRect)f {
+             [(UIView *)environment setNeedsLayout];
+         }];
+         self.multipleTouchEnabled = YES; self.opaque = NO; self.backgroundColor = UIColor.clearColor;
++#if DM_TOUCH_FEEDBACK
+         const char *feedback = getenv("DM_TOUCH_HAPTICS");
+         if (!feedback || atoi(feedback)) {
+             _touchFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+             [_touchFeedback prepare];
+         }
++#endif
+         _owner = [NSMapTable strongToStrongObjectsMapTable]; _faceOf = [NSMapTable strongToStrongObjectsMapTable];
+         if (!k_idle) {
+             // each colour carries its own low opacity instead of lowering the whole view's alpha (that would add an off-screen pass for the full-screen layer)
+@@ -295,8 +306,12 @@ - (void)opmodeChanged {   // docked: the Tap layout goes (the game reads no touc
+     [self reset]; _tap = NO; _full = NO; [self applyLayout]; [self setNeedsLayout];
+ }
+ - (void)setTouchFeedback:(BOOL)on {
++#if DM_TOUCH_FEEDBACK
+     if (!on) { _touchFeedback = nil; return; }
+     if (!_touchFeedback) { _touchFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight]; [_touchFeedback prepare]; }
++#else
++    (void)on;
++#endif
+ }
+ 
+ // ---- Layout (points; computed inside the safe area) ----
+@@ -393,9 +408,11 @@ - (void)recompute {
+     BOOL changed = face != _faceBits || dpad != _dpadBits || btn != _btnBits;
+     uint64_t pressed = (face | dpad | btn) & ~(_faceBits | _dpadBits | _btnBits);
+     unsigned gripping = (_stick[0] ? 1u : 0) | (_stick[1] ? 2u : 0);
++#if DM_TOUCH_FEEDBACK
+     if (pressed || (gripping & ~_hapticSticks)) {
+         [_touchFeedback impactOccurredWithIntensity:0.6]; [_touchFeedback prepare];
+     }
++#endif
+     _hapticSticks = gripping;
+     _faceBits = face; _dpadBits = dpad; _btnBits = btn;
+     pthread_mutex_lock(&g_mu);
+diff --git a/dm/ios/Sources/front_ios.m b/dm/ios/Sources/front_ios.m
+index ae127a8..4aa01d2 100644
+--- a/dm/ios/Sources/front_ios.m
++++ b/dm/ios/Sources/front_ios.m
+@@ -28,6 +28,21 @@
+ static void quit_close(void);
+ #import "DmLayout.h"
+ #import "DmGameMenu.h"
++#include <TargetConditionals.h>
++// visionOS has no UIScreen: a window is a panel in the room, with no screen of its own, no brightness and no external display. DM_VISION is 1 there
++#if defined(TARGET_OS_VISION) && TARGET_OS_VISION
++#define DM_VISION 1
++#else
++#define DM_VISION 0
++#endif
++// The pixels per point of the screen a scene is on; on visionOS, and for a view in no window, the scale of the view's traits
++static CGFloat dm_scene_scale(UIWindowScene *scene, CGFloat fallback) {
++#if DM_VISION
++    (void)scene; return fallback;
++#else
++    UIScreen *screen = scene.screen; return screen ? screen.nativeScale : fallback;
++#endif
++}
+ 
+ void front_ios_boot(void);
+ int front_ios_boot_ok(void);
+@@ -65,8 +80,7 @@ - (void)didMoveToWindow { [super didMoveToWindow]; [self setNeedsLayout]; }   //
+ - (void)layoutSubviews {   // render at the pixels of the screen the view is on (an iPad window can move to another), at most maxPixelWidth across
+     [super layoutSubviews];
+     CAMetalLayer *l = (CAMetalLayer *)self.layer;
+-    UIScreen *screen = self.window.windowScene.screen;
+-    CGFloat scale = screen ? screen.nativeScale : MAX(self.traitCollection.displayScale, 1);
++    CGFloat scale = dm_scene_scale(self.window.windowScene, MAX(self.traitCollection.displayScale, 1));
+     if (self.maxPixelWidth > 0) scale = MIN(scale, self.maxPixelWidth / MAX(self.bounds.size.width, 1));
+     l.contentsScale = scale;
+     l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
+@@ -140,7 +154,7 @@ - (void)viewDidLoad {
+         [self showHint:why ? [NSString stringWithFormat:@"Game files unusable.\n%s", why] : @"Game files not found.\nPut the RomFS folder into this App's Documents as \"romfs\" (Files app), then restart."]; return;
+     }
+     front_ios_audio_watch();
+-#if defined(__IPHONE_27_0)   // compiled only with an SDK that has the scene accessory API
++#if defined(__IPHONE_27_0) && !DM_VISION   // compiled only with an SDK that has the scene accessory API (visionOS has no external display)
+     if (@available(iOS 27.0, *)) {   // iOS 27 offers a TV scene only to a registered scene accessory, no longer from the Info.plist entry alone (that path stays for iOS 26)
+         UISceneConfiguration *c = [[UISceneConfiguration alloc] initWithName:@"TV" sessionRole:UIWindowSceneSessionRoleExternalDisplayNonInteractive];
+         c.delegateClass = DmTVSceneDelegate.class;
+@@ -180,7 +194,12 @@ - (void)startGame {
+         // Manager or Split View the app does not fill the screen. Resolved here, before the host writes the state page (main.c dm_fps_state_apply)
+         const char *a = getenv("DM_SCREEN_ASPECT");
+         if (a && !strcmp(a, "auto")) {
+-            CGSize sz = self.view.window ? self.view.window.bounds.size : UIScreen.mainScreen.bounds.size; double r = MAX(sz.width, sz.height) / MAX(MIN(sz.width, sz.height), 1);
++            #if DM_VISION
++            CGSize sz = self.view.window ? self.view.window.bounds.size : self.view.bounds.size;
++#else
++            CGSize sz = self.view.window ? self.view.window.bounds.size : UIScreen.mainScreen.bounds.size;
++#endif
++            double r = MAX(sz.width, sz.height) / MAX(MIN(sz.width, sz.height), 1);
+             char v[16]; if ((r >= 1.3 && r < 1.77) || (r >= 1.8 && r <= 4.0)) snprintf(v, sizeof v, "%.3f", r); else strcpy(v, "0");
+             setenv("DM_SCREEN_ASPECT", v, 1); LOG("front end: picture shape auto: window %.0fx%.0f points (%.3f:1) → DM_SCREEN_ASPECT=%s", sz.width, sz.height, r, v);
+         }
+@@ -280,7 +299,7 @@ static void tv_attach(void) {
+     // Taken from the picture, not the screen, so a display of another shape still gets the full 1920 pixels across the picture (DmGameView layoutSubviews applies it)
+     v.maxPixelWidth = 1920;
+     [g_tv.rootViewController.view addSubview:v]; [g_tv.rootViewController.view setNeedsLayout]; [g_root.view setNeedsLayout];   // the phone's pad takes the whole screen
+-    CGRect f = dm_aspect_fit(g_tv.bounds, g_picture_aspect); CGFloat scale = MIN(g_tv.windowScene.screen.nativeScale, 1920.0 / MAX(f.size.width, 1));
++    CGRect f = dm_aspect_fit(g_tv.bounds, g_picture_aspect); CGFloat scale = MIN(dm_scene_scale(g_tv.windowScene, MAX(g_tv.traitCollection.displayScale, 1)), 1920.0 / MAX(f.size.width, 1));
+     if (g_tv_mode_was < 0) g_tv_mode_was = dm_opmode();
+     dm_set_opmode(1); dm_gamepad_opmode_changed();
+     LOG("front end: TV connected (%.0fx%.0f points), the picture moves there at %.0fx%.0f, console mode", g_tv.bounds.size.width, g_tv.bounds.size.height, f.size.width * scale, f.size.height * scale);
+@@ -365,8 +384,10 @@ - (void)sceneDidDisconnect:(UIScene *)s { if (g_tv == self.window) tv_detach();
+ int dm_low_power_now(void) { return NSProcessInfo.processInfo.lowPowerModeEnabled; }   // the frame step does not probe in it (hle_nvn.c fstep_cpu_slowed)
+ double dm_brightness_now(void) { return g_brightness; }
+ static void front_ios_power_watch(void) {
++#if !DM_VISION   // no screen brightness on visionOS: it stays -1, as on the Mac
+     g_brightness = UIScreen.mainScreen.brightness;
+     g_obs[0] = [NSNotificationCenter.defaultCenter addObserverForName:UIScreenBrightnessDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; g_brightness = UIScreen.mainScreen.brightness; }];
++#endif
+     g_obs[1] = [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
+         (void)n; LOG("front end: thermal state → %d (%.0f s after launch)", dm_thermal_now(), (now_ns() - g_t0_ns) / 1e9); }];
+     g_obs[2] = [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoPowerStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
+@@ -425,9 +446,13 @@ void front_progress(const char *title, long done, long total) {
+ }
+ void *front_metal_layer(void) { return (__bridge void *)g_layer; }
+ int front_display_pixels(int *w, int *h) {   // the screen in pixels, landscape (nativeBounds is portrait); UIScreen's sizes may be read from any thread
++#if DM_VISION   // no screen to measure: the docked picture takes its default, 1920x1080 (hle_vi.c)
++    (void)w; (void)h; return 0;
++#else
+     CGRect b = UIScreen.mainScreen.nativeBounds; int a = (int)b.size.width, c = (int)b.size.height;
+     if (a <= 0 || c <= 0) return 0;
+     *w = a > c ? a : c; *h = a > c ? c : a; return 1;
++#endif
+ }
+ // Offline HTML pages (web_apple.m): the page's view goes over the game view and under the gamepad, which lets touches on no control through to it while the page is
+ // shown (DmGamepad.m hitTest); the page takes them as a click on what they land on, and the gamepad and controllers drive it as on the Switch
