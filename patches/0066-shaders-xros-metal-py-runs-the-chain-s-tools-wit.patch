@@ -1,0 +1,209 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: miogds <miogds@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 16:40:20 +0100
+Subject: [PATCH] shaders: xros_metal.py runs the chain's tools with a visionOS
+ compile standard
+
+A Metal library carries its platform, so the libraries the chain compiles
+for the iPhone (ios_metal.py) are not visionOS libraries. The chain's
+files are not changed for it: dm/ios/tools/xros_metal.py loads a second
+copy of the module ios_metal with the target changed (the xros SDK,
+-target air64-apple-xros26.0 in place of the iPhone's deployment target),
+puts it where `import ios_metal` finds it, and runs a chain tool:
+
+  IOSOUT=<visionOS folder> python3 dm/ios/tools/xros_metal.py dm/gfx/tools/dmsh_build.py ...
+  python3 dm/ios/tools/xros_metal.py dm/gfx/tools/vk_shaders.py ... --ios <visionOS folder>
+
+Every other flag is read from ios_metal.py as it is. The record names the
+visionOS compile, so the reflection files say what was run and the
+compiled-shader cache, keyed by the record, keeps the two platforms'
+libraries apart. dmsh_build.py forks its workers, which therefore have
+the copy too.
+
+dm/ios/tests/test_xros_metal.py: only the target differs, the iPhone
+module is untouched, a tool and its forked worker see the visionOS
+standard, and the compiled library is tagged visionOS.
+
+Not run on a game's shaders (none here), and scripts/build_ipa_from_nsp.py
+does not call it yet: its shader steps still build iPhone libraries.
+
+Upstream-Status: fork-only
+Reason: visionOS is outside upstream's support matrix: the chain's tools compile visionOS shader libraries through a wrapper, the chain's files unchanged
+Issue: none yet (miogds/NX2Apple, visionOS evaluation branch; to be filed before this goes to LNPANDY/NX2Apple)
+
+---
+ dm/ios/tests/test_xros_metal.py | 94 +++++++++++++++++++++++++++++++++
+ dm/ios/tools/xros_metal.py      | 63 ++++++++++++++++++++++
+ 2 files changed, 157 insertions(+)
+ create mode 100644 dm/ios/tests/test_xros_metal.py
+ create mode 100644 dm/ios/tools/xros_metal.py
+
+diff --git a/dm/ios/tests/test_xros_metal.py b/dm/ios/tests/test_xros_metal.py
+new file mode 100644
+index 0000000..772fc17
+--- /dev/null
++++ b/dm/ios/tests/test_xros_metal.py
+@@ -0,0 +1,94 @@
++"""dm/ios/tools/xros_metal.py: the chain's iPhone compile standard, retargeted to visionOS without a change to ios_metal.py."""
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++import unittest
++
++REPO = Path(__file__).resolve().parents[3]
++TOOLS = REPO / 'dm/ios/tools'
++sys.path.insert(0, str(TOOLS))
++import ios_metal
++import xros_metal
++
++MSL = '#include <metal_stdlib>\nusing namespace metal;\nfragment float4 f() { return float4(1); }\n'
++
++
++def has_metal(sdk):
++    return sys.platform == 'darwin' and subprocess.run(['xcrun', '-sdk', sdk, 'metal', '--version'], capture_output=True).returncode == 0
++
++
++def platform_of(lib):
++    out = subprocess.run(['xcrun', 'metal-readobj', '--file-headers', str(lib)], capture_output=True, text=True, check=True).stdout
++    return next(line.split()[1] for line in out.splitlines() if line.strip().startswith('Platform:'))
++
++
++class Variant(unittest.TestCase):
++    def test_only_the_target_differs_from_the_iphone_standard(self):
++        v = xros_metal.variant()
++        ios_min = ios_metal.IOS_MIN_FLAG
++        strip = lambda cmd, drop: [a for a in cmd[3:] if a not in drop]
++        self.assertEqual(v.METAL[:3], ['xcrun', '-sdk', 'xros'])
++        self.assertEqual(v.METALLIB[:3], ['xcrun', '-sdk', 'xros'])
++        self.assertEqual(strip(v.METAL, ('-target', xros_metal.TARGET)), strip(ios_metal.METAL, (ios_min,)))
++        self.assertEqual(v.METALLIB[3:], ios_metal.METALLIB[3:])
++        self.assertEqual([a for a in v.IOS_FLAGS if a not in ('-target', xros_metal.TARGET)], [a for a in ios_metal.IOS_FLAGS if a != ios_min])
++        self.assertIn(xros_metal.TARGET, v.METAL)
++        self.assertNotIn(ios_min, v.METAL)
++
++    def test_the_record_names_the_visionos_compile(self):
++        v = xros_metal.variant()
++        self.assertIn(' '.join(v.METAL), v.RECORD)
++        self.assertIn(' '.join(v.METALLIB), v.RECORD)
++        self.assertNotIn('iphoneos', v.RECORD)
++        self.assertNotEqual(v.RECORD, ios_metal.RECORD)   # the compiled-shader cache is keyed by it: no iPhone library is taken for a visionOS one
++
++    def test_the_iphone_module_is_left_as_it_was(self):
++        before = (list(ios_metal.METAL), list(ios_metal.METALLIB), list(ios_metal.IOS_FLAGS), ios_metal.RECORD, ios_metal.IOS_MIN_FLAG)
++        xros_metal.variant()
++        self.assertEqual(before, (ios_metal.METAL, ios_metal.METALLIB, ios_metal.IOS_FLAGS, ios_metal.RECORD, ios_metal.IOS_MIN_FLAG))
++        self.assertIs(sys.modules['ios_metal'], ios_metal)
++
++    def test_a_tool_run_through_it_imports_the_visionos_standard(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            tool = Path(tmp) / 'tool.py'   # imports the module the way dmsh_build.py does, also in a forked worker
++            tool.write_text('import os, sys, multiprocessing\n'
++                            f'sys.path.insert(0, {str(TOOLS)!r}); import ios_metal\n'
++                            'def child(q): import ios_metal as again; q.put(again.RECORD)\n'
++                            'if __name__ == "__main__":\n'
++                            '    ctx = multiprocessing.get_context("fork"); q = ctx.Queue(); p = ctx.Process(target=child, args=(q,)); p.start()\n'
++                            '    print(sys.argv[1:]); print(ios_metal.RECORD); print(q.get()); p.join()\n')
++            r = subprocess.run([sys.executable, str(TOOLS / 'xros_metal.py'), str(tool), 'a', 'b'], capture_output=True, text=True)
++            self.assertEqual(r.returncode, 0, r.stderr)
++            args, record, forked = r.stdout.splitlines()
++            self.assertEqual(args, "['a', 'b']")
++            self.assertEqual(record, xros_metal.variant().RECORD)
++            self.assertEqual(forked, record)
++            plain = subprocess.run([sys.executable, str(tool)], capture_output=True, text=True)
++            self.assertEqual(plain.stdout.splitlines()[1], ios_metal.RECORD)
++
++
++@unittest.skipUnless(has_metal('xros') and has_metal('iphoneos'), 'needs the Metal toolchain with the iPhone and the visionOS SDK')
++class Compile(unittest.TestCase):
++    def test_the_library_is_a_visionos_library(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            msl = Path(tmp) / 'f.metal'; msl.write_text(MSL)
++            xros_metal.variant().compile(str(msl), str(Path(tmp) / 'x.air'), str(Path(tmp) / 'x.metallib'))
++            ios_metal.compile(str(msl), str(Path(tmp) / 'i.air'), str(Path(tmp) / 'i.metallib'))
++            self.assertEqual(platform_of(Path(tmp) / 'x.metallib'), 'METALLIB_PLATFORM_XROS')
++            self.assertEqual(platform_of(Path(tmp) / 'i.metallib'), 'METALLIB_PLATFORM_IOS')
++
++    def test_the_iphoneos_sdk_writes_a_visionos_library_for_the_visionos_target(self):
++        """vk_shaders.py and gl_shaders.py run `xcrun -sdk iphoneos metal` with IOS_FLAGS: with the visionOS target the library is a visionOS one."""
++        flags = xros_metal.variant().IOS_FLAGS
++        with tempfile.TemporaryDirectory() as tmp:
++            msl = Path(tmp) / 'f.metal'; msl.write_text(MSL)
++            for sdk in ('iphoneos', 'xros'):
++                lib = Path(tmp) / f'{sdk}.metallib'
++                subprocess.run(['xcrun', '-sdk', sdk, 'metal', '-w', *flags, '-o', str(lib), str(msl)], check=True, capture_output=True)
++                self.assertEqual(platform_of(lib), 'METALLIB_PLATFORM_XROS')
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/dm/ios/tools/xros_metal.py b/dm/ios/tools/xros_metal.py
+new file mode 100644
+index 0000000..b8cf7bb
+--- /dev/null
++++ b/dm/ios/tools/xros_metal.py
+@@ -0,0 +1,63 @@
++#!/usr/bin/env python3
++"""The shader packaging chain's compile standard for visionOS, without a change to the chain.
++
++A Metal library is tagged with its platform, so the libraries ios_metal.py compiles for the iPhone are not visionOS libraries.
++The chain's tools (dmsh_build.py, vk_shaders.py, gl_shaders.py) take their iPhone compile standard from the module ios_metal;
++this file gives them a second copy of that module with one thing changed, the target: visionOS (TARGET) in place of the iPhone's
++deployment target, and the xros SDK. Every other flag is read from ios_metal.py as it is, so a change there reaches visionOS too.
++
++  xros_metal.py <tool.py> [arguments...]   runs the tool with that copy in place of ios_metal (IOSOUT, --ios: where its
++                                           "iOS" libraries go, here the visionOS ones; give them a folder of their own)
++
++What follows from the changed record (RECORD names the compile, as ios_metal's does): the reflection files record the
++visionOS compile, and the compiled-shader cache (dmsh_mtlcache.py, keyed by the record) keeps visionOS libraries apart from
++the iPhone's. The tools still name the iphoneos SDK where they have it written out (the compiler's identity, vk_shaders.py and
++gl_shaders.py's xcrun): with a visionOS target the Metal compiler writes a visionOS library from either SDK
++(dm/ios/tests/test_xros_metal.py checks both).
++
++dmsh_build.py's worker processes are forked, so they have the copy too. A tool that started Python again would not."""
++import importlib.util, os, runpy, sys
++
++HERE = os.path.dirname(os.path.abspath(__file__))
++SDK = 'xros'
++TARGET = 'air64-apple-xros26.0'   # visionOS 26.0, the app's deployment target (project_sdk.py); the Metal compiler has no -m<os>-version-min for visionOS
++
++
++def variant():
++    """ios_metal.py loaded a second time, with the visionOS target. The module ios_metal itself is not touched."""
++    spec = importlib.util.spec_from_file_location('ios_metal', os.path.join(HERE, 'ios_metal.py'))
++    m = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(m)
++    ios_min, target = m.IOS_MIN_FLAG, ['-target', TARGET]
++
++    def retarget(cmd):   # one of its xcrun commands: the SDK, and the deployment target flag wherever it is
++        if cmd[:3] != ['xcrun', '-sdk', 'iphoneos']: raise RuntimeError(f'ios_metal.py: an unexpected command {cmd}')
++        out = ['xcrun', '-sdk', SDK]
++        for a in cmd[3:]: out += target if a == ios_min else [a]
++        return out
++
++    if ios_min not in m.METAL or ios_min not in m.IOS_FLAGS: raise RuntimeError('ios_metal.py: IOS_MIN_FLAG is not in METAL and IOS_FLAGS')
++    record = m.RECORD
++    old_metal, old_lib = ' '.join(m.METAL), ' '.join(m.METALLIB)
++    m.IOS_FLAGS = [x for a in m.IOS_FLAGS for x in (target if a == ios_min else [a])]
++    m.METAL, m.METALLIB = retarget(m.METAL), retarget(m.METALLIB)
++    if old_metal not in record or old_lib not in record: raise RuntimeError('ios_metal.py: RECORD does not name METAL and METALLIB')
++    m.RECORD = record.replace(old_metal, ' '.join(m.METAL)).replace(old_lib, ' '.join(m.METALLIB))
++    m.IOS_MIN_FLAG = ' '.join(target)   # for a reader of the one flag; the lists above carry it as two arguments
++    return m
++
++
++def install():
++    """Put the visionOS copy where `import ios_metal` finds it."""
++    m = variant()
++    sys.modules['ios_metal'] = m
++    return m
++
++
++if __name__ == '__main__':
++    if len(sys.argv) < 2: sys.exit(__doc__)
++    install()
++    tool = sys.argv[1]
++    sys.argv = sys.argv[1:]
++    sys.path.insert(0, os.path.dirname(os.path.abspath(tool)))   # as python <tool.py> does
++    runpy.run_path(tool, run_name='__main__')
