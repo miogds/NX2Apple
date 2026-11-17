@@ -646,6 +646,7 @@ public struct LibraryView: View {
                     }
             } else { Label(label, systemImage: symbol) }
         }
+            .neutralTintOnVision()
             .accessibilityLabel(accessibilityLabel)
             .accessibilityIdentifier(identifier)
             .shellTarget(target, radius: 22, action: action)

@@ -3,11 +3,31 @@
 // Each stand-in has the name and the call shape of the real one, so no view needs a branch of its own:
 // the compiler prefers the available declaration of this module over the unavailable one of SwiftUI.
 // A button style falls back to the bordered one, a container to its content, and an effect to nothing.
-#if os(visionOS)
 import SwiftUI
 
-extension PrimitiveButtonStyle where Self == BorderedButtonStyle {
-    static var glass: BorderedButtonStyle { BorderedButtonStyle() }
+extension View {
+    /// On visionOS, drops the shell's cream tint from a control that draws a white label on its own fill. No change elsewhere.
+    @ViewBuilder func neutralTintOnVision() -> some View {
+        #if os(visionOS)
+        self.tint(nil)
+        #else
+        self
+        #endif
+    }
+}
+
+#if os(visionOS)
+
+/// The plain glass button: visionOS's bordered button, without the shell's cream tint. A bordered button there fills
+/// with its tint and draws a white label, so the cream that is an accent on iOS hid the icon.
+struct VisionGlassButtonStyle: PrimitiveButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button(configuration).buttonStyle(.bordered).tint(nil)
+    }
+}
+
+extension PrimitiveButtonStyle where Self == VisionGlassButtonStyle {
+    static var glass: VisionGlassButtonStyle { VisionGlassButtonStyle() }
 }
 
 extension PrimitiveButtonStyle where Self == BorderedProminentButtonStyle {
