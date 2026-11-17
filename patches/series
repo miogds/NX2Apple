@@ -59,3 +59,4 @@
 0061-build-seed-infer-and-self-heal-gl-and-vulkan-gfx.patch
 0062-ios-compile-the-host-and-the-front-end-for-visio.patch
 0063-ios-the-launcher-s-play-button-compiles-for-visi.patch
+0064-build-dm-sdk-xros-builds-the-ios-app-for-visiono.patch
