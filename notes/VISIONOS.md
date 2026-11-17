@@ -1,7 +1,7 @@
 # visionOS evaluation
 
-Branch `visionos/engine-compile`. Everything here was checked with Xcode 27.2 on synthetic inputs: no game files, no Vision Pro.
-Nothing has run a game on visionOS yet.
+Branch `visionos/engine-compile`, built with Xcode 27.2. One game has been built from its dump and played on a Vision Pro
+(2026-11-17, below); everything else was checked on synthetic inputs.
 
 ## What is in place
 
@@ -11,8 +11,8 @@ Nothing has run a game on visionOS yet.
 | `DM_SDK=xros` in the build tools | patches 0064, 0065 | the one-game app, the game framework and the prepared project build for visionOS |
 | Shell UI | `frontend-ios` (`VisionCompat.swift`, `Package.swift`) | builds for visionOS 27.1, runs in the Apple Vision Pro simulator |
 | Shell app | `frontend-ios/Shell/build_shell.sh` | `DM_SDK=xros` links `DmShell.app` for visionOS |
-| visionOS shader libraries | patch 0066 (`dm/ios/tools/xros_metal.py`) | the wrapper is tested on a sample shader, never on a game's shaders |
-| A game build from NSPs | patch 0067 (`--platform visionos`) | wired and unit-tested, never run on a game |
+| visionOS shader libraries | patch 0066 (`dm/ios/tools/xros_metal.py`) | compiled one game's 42,848 shaders, which load and draw on the device |
+| A game build from NSPs | patch 0067 (`--platform visionos`) | built one game end to end, played on the device |
 
 `DM_SDK` is `iphoneos` by default: without it every script does what it did.
 
@@ -22,7 +22,8 @@ Nothing has run a game on visionOS yet.
 - No simulator: neither the visionOS nor the iOS simulator SDK has Metal 4, so the engine only runs on a device.
 - No pipeline archive unless `DM_PSO_GPUS` names the GPUs (the profiles list iPhone GPUs).
 - No tap feedback for the touch controls, no screen brightness, no external display.
-- Unknown until a device run: the memory limit and whether the Increased Memory Limit entitlement is honoured, BC texture support, performance.
+- Xcode's debugger stops the game on a fault the engine raises on purpose (see the device run below): run without it.
+- Still unknown: whether the Increased Memory Limit entitlement is honoured, and how other games and other headsets behave.
 
 ## Checks that need no game
 
@@ -64,8 +65,29 @@ It is the iOS build with three differences: the device's shader libraries are co
 `dm/ios/tools/xros_metal.py`) into `sh/xros`, `build_ipa.sh` runs with `DM_SDK=xros`, and the app build works in `ipa-xros`,
 `xcode-xros` and `xcode-derived-data-xros`. An iPhone build of the same game in the same work folder is left as it was.
 
-This has passed the scripts' tests but has never built a real game: the first run is the test. The log of each step is in the
-work folder's `logs/` (`dmsh_build.log`, `build_ipa.log`, `prepare_xcode.log`).
+The log of each step is in the work folder's `logs/` (`dmsh_build.log`, `build_ipa.log`, `prepare_xcode.log`). The script's
+own messages still say "iOS shaders" and "iPhone or iPad" on a visionOS build.
+
+### Run it without the debugger
+
+In the prepared project: Product > Scheme > Edit Scheme > Run > Info, untick "Debug executable" (or stop the run and open the
+app on the headset). With the debugger attached the game stops within seconds on `EXC_BAD_ACCESS (code=2)` at an address in the
+game's heap. That is not a crash: the engine write-protects the pages of an uploaded texture and its fault handler takes the
+game's next write to them (`dm/gfx/nvn/nvn_dirty.c`), but lldb gets the fault first. A real crash writes a `CRASH sig=` line
+to the app's `Documents/log.txt`.
+
+### Device run, 2026-11-17
+
+The Legend of Zelda: Ocarina of Time (Switch 2, title `0400486024DEC000`, update v131072) on an Apple Vision Pro
+(RealityDevice17,1, Apple M5 GPU), built with `--platform visionos --prepare-xcode --allow-damaged` (the dump has three damaged
+textures). The player reports it plays smoothly; its profile caps it at 30 fps.
+
+- Build: 42,848 shaders compiled for visionOS in 37 minutes, none from a cache; the app links for visionOS 26.0.
+- Memory: the profile's 9 GB pool is more than the 7.94 GB the app may use, so the engine backed guest memory with files
+  (its own choice, `DM_GUEST_FILE` unset); the game opened a 6.2 GB heap.
+- Graphics: 15 host shader libraries compiled for `xros` loaded; 2,691 render and 324 compute pipelines were built in 1.15 s
+  before the first frame, with no pipeline archive.
+- Not measured: frame times, power, a long session. One game on one headset.
 
 The Mac launcher has no visionOS choice yet: use the command line.
 
