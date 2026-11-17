@@ -1,0 +1,48 @@
+// visionOS stand-ins for the Liquid Glass and toolbar API the shell views use on iOS and macOS 26.
+// The visionOS SDK marks these unavailable (windows there are already glass), so the views would not compile.
+// Each stand-in has the name and the call shape of the real one, so no view needs a branch of its own:
+// the compiler prefers the available declaration of this module over the unavailable one of SwiftUI.
+// A button style falls back to the bordered one, a container to its content, and an effect to nothing.
+#if os(visionOS)
+import SwiftUI
+
+extension PrimitiveButtonStyle where Self == BorderedButtonStyle {
+    static var glass: BorderedButtonStyle { BorderedButtonStyle() }
+}
+
+extension PrimitiveButtonStyle where Self == BorderedProminentButtonStyle {
+    static var glassProminent: BorderedProminentButtonStyle { BorderedProminentButtonStyle() }
+}
+
+/// SwiftUI's container merges the glass shapes of its children. Here it only shows them.
+struct GlassEffectContainer<Content: View>: View {
+    private let content: Content
+    init(spacing: CGFloat? = nil, @ViewBuilder content: () -> Content) { self.content = content() }
+    var body: some View { content }
+}
+
+enum VisionGlassTransition { case identity, matchedGeometry }
+enum VisionScrollEdgeStyle { case automatic, soft, hard }
+
+extension View {
+    func glassEffectID(_ id: some Hashable & Sendable, in namespace: Namespace.ID) -> some View { self }
+    func glassEffectTransition(_ transition: VisionGlassTransition) -> some View { self }
+    func scrollEdgeEffectStyle(_ style: VisionScrollEdgeStyle?, for edges: Edge.Set) -> some View { self }
+    func scrollEdgeEffectHidden(_ hidden: Bool = true, for edges: Edge.Set = .all) -> some View { self }
+    func navigationSubtitle(_ subtitle: String) -> some View { self }
+}
+
+extension ToolbarContent {
+    func sharedBackgroundVisibility(_ visibility: Visibility) -> some ToolbarContent { self }
+}
+
+/// A fixed gap between toolbar items.
+struct ToolbarSpacer: ToolbarContent {
+    enum Sizing { case fixed, flexible }
+    private let placement: ToolbarItemPlacement
+    init(_ sizing: Sizing = .flexible, placement: ToolbarItemPlacement = .automatic) { self.placement = placement }
+    var body: some ToolbarContent {
+        ToolbarItem(placement: placement) { Color.clear.frame(width: 8, height: 1).accessibilityHidden(true) }
+    }
+}
+#endif
