@@ -60,3 +60,4 @@
 0062-ios-compile-the-host-and-the-front-end-for-visio.patch
 0063-ios-the-launcher-s-play-button-compiles-for-visi.patch
 0064-build-dm-sdk-xros-builds-the-ios-app-for-visiono.patch
+0065-build-build-ipa-sh-builds-the-app-the-framework.patch

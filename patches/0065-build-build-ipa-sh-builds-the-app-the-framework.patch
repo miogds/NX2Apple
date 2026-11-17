@@ -1,0 +1,174 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: miogds <miogds@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 16:36:04 +0100
+Subject: [PATCH] build: build_ipa.sh builds the app, the framework and the
+ project for visionOS
+
+DM_SDK=xros (default iphoneos) now reaches build_ipa.sh too:
+
+- tools/project_sdk.py writes the visionOS project from the iOS templates
+  (project.yml, project-framework.yml): every target's platform, the
+  deployment target and device family 7. The templates stay the iOS ones;
+  build_ipa.sh generates from Gen/project-sdk.yml with this folder as the
+  project root, and build_smoke.py uses the same converter.
+- xcodebuild takes the SDK and the destination of DM_SDK, and the products
+  are read from Release-<sdk>.
+- No pipeline archive is made for visionOS unless DM_PSO_GPUS names its
+  GPUs: the profile's pso_gpu lists iPhone GPUs.
+
+The game's shader libraries (MSL_IOS) are packed as given, and the shader
+build still compiles them for the iPhone SDK only.
+
+Without DM_SDK the script runs the commands it did; the log line the tests
+slice the script by is unchanged.
+
+Upstream-Status: fork-only
+Reason: visionOS is outside upstream's support matrix: DM_SDK=xros reaches build_ipa.sh (app, game framework, prepared project)
+Issue: none yet (miogds/NX2Apple, visionOS evaluation branch; to be filed before this goes to LNPANDY/NX2Apple)
+
+---
+ dm/ios/tools/build_ipa.sh   | 23 +++++++++++++++++------
+ dm/ios/tools/build_smoke.py | 11 ++++-------
+ dm/ios/tools/project_sdk.py | 28 ++++++++++++++++++++++++++++
+ 3 files changed, 49 insertions(+), 13 deletions(-)
+ create mode 100644 dm/ios/tools/project_sdk.py
+
+diff --git a/dm/ios/tools/build_ipa.sh b/dm/ios/tools/build_ipa.sh
+index 1221d51..050a48b 100755
+--- a/dm/ios/tools/build_ipa.sh
++++ b/dm/ios/tools/build_ipa.sh
+@@ -27,10 +27,15 @@
+ #   program 0's being GAME / PATCHED / ROMFS / MSL_IOS / GFXAPI (the app's name, version, icon and identity are its). Each program's modules go in sections tagged p<N> (gen_embed.py --tag),
+ #   its tables and launcher settings in dm/p<N>/, its RomFS and offline HTML pages in p<N>/, its shader libraries in msl/p<N>/, and the host is built over a table of their profiles
+ #   (game.py header_multi, the first program's profile lists them); main.m picks the program the last oe::ExecuteProgram recorded (Documents/program.bin). With --prepare-xcode the project's build phase copies them so (stage_resources.sh)
++#   DM_SDK=xros builds the same app, framework or project for visionOS (default iphoneos): the project is written from the iOS template (tools/project_sdk.py), gen_build.py takes the
++#     host's shaders and frameworks of that SDK, and the products are in Release-xros. The game's shader libraries (MSL_IOS) are packed as given: they must be built for the same SDK,
++#     which the shader build does not do yet. No pipeline archive is made for visionOS unless DM_PSO_GPUS names its GPUs (the profile's pso_gpu lists iPhone GPUs)
+ set -u
+ cd "$(dirname "$0")/.." || exit 1
+ IOS_SOURCE=$PWD; IOS=$PWD; DM=$(cd .. && pwd)
+ t() { echo "[$(date +%T)] $*"; }; die() { t "FAIL: $*"; exit 1; }
++export DM_SDK=${DM_SDK:-iphoneos}
++case "$DM_SDK" in iphoneos) OS_NAME=iOS; OS_DEVICES='iPhone + iPad';; xros) OS_NAME=visionOS; OS_DEVICES='Apple Vision Pro';; *) die "DM_SDK=$DM_SDK: iphoneos or xros";; esac
+ [ -n "${GAME:-}" ] || die "GAME is not set: GAME=<base game title ID> $0; profiles: $(python3 "$DM/games/game.py" list | awk -F'\t' '{printf "%s (%s)  ", $1, $3}')"
+ export GAME; GD=$(python3 "$DM/games/game.py" dir "$GAME") || die "no game profile $GAME"   # dm/games/<id>, or a profile in DM_GAMES_DIR (the NSP script's provisional one); the make that gen_build.py runs uses the same GAME
+ gp() { python3 "$DM/games/game.py" "$GAME" "$1" || die "game profile $GD: $1"; }   # read a key of the game profile
+@@ -197,7 +202,7 @@ else TD=Gen/dm; program_tables; LJ=Gen/dm/launcher.json; fi
+ PSO=; P4=$(python3 "$DM/games/game.py" "$GAME" pso_mtl4 off) || die "game profile $GD: pso_mtl4"; PG=$(python3 "$DM/games/game.py" "$GAME" pso_gpu '') || die "game profile $GD: pso_gpu"
+ PGK=g18p; N=0; for w in $PG; do case $w in none) N=9; break ;; esac; case ${w#applegpu_} in '' | *[!A-Za-z0-9]*) N=9; break ;; esac; N=$((N+1)); done
+ if [ "$P4" = on ] && [ "$PG" ]; then case $N in 1 | 2 | 3 | 4) PGK=$(echo "$PG" | tr -s ' \t' ',') ;; *) t "profile $GD: pso_gpu '$PG' is not 1-4 whitespace-separated GPU architectures (each one such as g18p or applegpu_g19p, with or without the applegpu_ prefix; there is no none: without the key the archive defaults follow pso_mtl4) - taking g18p" ;; esac; fi
+-if [ -n "${DM_PSO_GPUS+set}" ]; then GPUS=$DM_PSO_GPUS; elif [ "$P4" = on ]; then GPUS=$PGK; else GPUS=none; fi
++if [ -n "${DM_PSO_GPUS+set}" ]; then GPUS=$DM_PSO_GPUS; elif [ "${DM_SDK:-iphoneos}" != iphoneos ]; then GPUS=none; elif [ "$P4" = on ]; then GPUS=$PGK; else GPUS=none; fi
+ if [ "$GFXAPI" = nvn ] && [ -n "$GPUS" ] && [ "$GPUS" != none ] && [ -f "$GD/shader_pairs.tsv" ]; then
+   PSO=$W/build/ios/pso/bundle
+   t "pipeline archive for $GPUS (metal-tt; minutes when its inputs changed)"
+@@ -313,7 +318,12 @@ if [ "$PREPARE_XCODE" = YES ] && [ "${DM_COPY_ROMFS:-YES}" = NO ]; then
+ fi
+ # The framework project is named explicitly. Everything else runs xcodegen exactly as before: a prepared project has its
+ # template copied in as project.yml, and the in-place build uses dm/ios/project.yml (the default template is never edited)
+-if [ "$PREPARE_XCODE" = YES ] || [ "$FRAMEWORK" != 1 ]; then xcodegen generate -q > /dev/null || die "xcodegen"
++# DM_SDK other than iphoneos: the project comes from the same template, written for that SDK into Gen/ (tools/project_sdk.py), with this folder as its root
++if [ "${DM_SDK:-iphoneos}" != iphoneos ]; then
++  SPEC=project.yml; [ "$PREPARE_XCODE" = YES ] || [ "$FRAMEWORK" != 1 ] || SPEC=project-framework.yml
++  python3 tools/project_sdk.py "$DM_SDK" "$SPEC" Gen/project-sdk.yml || die "project for $DM_SDK (tools/project_sdk.py)"
++  xcodegen generate -q --spec Gen/project-sdk.yml --project-root . --project . > /dev/null || die "xcodegen ($DM_SDK)"
++elif [ "$PREPARE_XCODE" = YES ] || [ "$FRAMEWORK" != 1 ]; then xcodegen generate -q > /dev/null || die "xcodegen"
+ else xcodegen generate -q --spec project-framework.yml > /dev/null || die "xcodegen"; fi
+ # DMCommit / DMChain: the checkout that built the app (+dirty with uncommitted changes to tracked files) and the shader chain it carries, which the host logs at start (main.c)
+ COMMIT=$(git -C "$DM" rev-parse --short=12 HEAD 2> /dev/null) && { [ -z "$(git -C "$DM" status --porcelain --untracked-files=no 2> /dev/null)" ] || COMMIT=$COMMIT+dirty
+@@ -340,12 +350,12 @@ fi
+ if [ -n "$FRAMEWORK_ONLY" ]; then
+   t "xcodebuild (Release, unsigned, the game framework $FW_NAME with its own host)"
+   mkdir -p "$O" "$FRAMEWORK_ONLY" || die "mkdir $FRAMEWORK_ONLY"
+-  xcodebuild -project DmIOS.xcodeproj -target DmShellGame -configuration Release -sdk iphoneos \
++  xcodebuild -project DmIOS.xcodeproj -target DmShellGame -configuration Release -sdk "${DM_SDK:-iphoneos}" \
+     CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= PRODUCT_NAME="$FW_NAME" PRODUCT_BUNDLE_IDENTIFIER="$DM_BUNDLE_ID.game" \
+     ${DM_NS_TAG:+DM_NS_TAG="$DM_NS_TAG"} \
+     DM_XCODE_OUTPUT_ROOT="$DD" SYMROOT="$DD/Build/Products" OBJROOT="$DD/Build/Intermediates.noindex" build > "$O/build-framework.log" 2>&1 \
+     || { grep -E 'error:' "$O/build-framework.log" | head -20; die "xcodebuild, log $O/build-framework.log"; }
+-  BUILT=$DD/Build/Products/Release-iphoneos/$FW_NAME.framework
++  BUILT=$DD/Build/Products/Release-${DM_SDK:-iphoneos}/$FW_NAME.framework
+   [ -f "$BUILT/$FW_NAME" ] || die "no built framework $BUILT"
+   OUTFW=$FRAMEWORK_ONLY/$FW_NAME.framework; mkdir -p "$OUTFW"
+   t "copying resources into $FW_NAME.framework"
+@@ -445,13 +455,14 @@ EOF
+ fi
+ 
+ t "xcodebuild (Release, unsigned, iPhone + iPad)"
++[ "${DM_SDK:-iphoneos}" = iphoneos ] || t "DM_SDK=$DM_SDK: built for $OS_NAME ($OS_DEVICES) instead"
+ mkdir -p "$O"
+-xcodebuild -project DmIOS.xcodeproj -scheme DmIOS -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$DD" \
++xcodebuild -project DmIOS.xcodeproj -scheme DmIOS -configuration Release -destination "generic/platform=${OS_NAME:-iOS}" -derivedDataPath "$DD" \
+   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= DM_COPY_GAME_RESOURCES=NO \
+   DM_XCODE_OUTPUT_ROOT="$DD" SYMROOT="$DD/Build/Products" OBJROOT="$DD/Build/Intermediates.noindex" build > "$O/build.log" 2>&1 \
+   || { grep -E 'error:' "$O/build.log" | head -20; die "xcodebuild, log $O/build.log"; }
+ # SYMROOT and OBJROOT above keep the unsigned build separate from the interactive Xcode app.
+-APP=$DD/Build/Products/Release-iphoneos/DmIOS.app
++APP=$DD/Build/Products/Release-${DM_SDK:-iphoneos}/DmIOS.app
+ [ -n "$APP" ] && [ -d "$APP" ] || die "no built app"; t "app: $APP"
+ 
+ # Straight from the sources: the app without its signature, and without the folders an app built before pack_ipa.py still has (DerivedData keeps resources that left the project;
+diff --git a/dm/ios/tools/build_smoke.py b/dm/ios/tools/build_smoke.py
+index 6e52ff5..fcf3d24 100644
+--- a/dm/ios/tools/build_smoke.py
++++ b/dm/ios/tools/build_smoke.py
+@@ -17,7 +17,9 @@ import sys
+ 
+ REPO = Path(__file__).resolve().parents[3]
+ sys.path.insert(0, str(REPO / 'dm/games'))
++sys.path.insert(0, str(Path(__file__).resolve().parent))
+ import game
++import project_sdk
+ 
+ 
+ def main():
+@@ -37,13 +39,8 @@ def main():
+     tables.mkdir(parents=True)
+     for name in ('Sources', 'tools'):
+         (project / name).symlink_to(ios / name, target_is_directory=True)
+-    spec = (ios / 'project.yml').read_text()
+-    if sdk == 'xros':   # the same project for visionOS: its platform, deployment target and device family (7, Apple Vision)
+-        for old, new in (('    iOS: "26.0"', '    visionOS: "26.0"'), ('    platform: iOS\n', '    platform: visionOS\n'),
+-                         ('TARGETED_DEVICE_FAMILY: "1,2"', 'TARGETED_DEVICE_FAMILY: "7"')):
+-            if spec.count(old) != 1: raise RuntimeError(f'project.yml: expected one {old.strip()!r}')
+-            spec = spec.replace(old, new)
+-    (project / 'project.yml').write_text(spec)
++    # The same project for the SDK (project_sdk.py: visionOS's platform, deployment target and device family)
++    (project / 'project.yml').write_text(project_sdk.convert((ios / 'project.yml').read_text(), sdk))
+     assets = gen / 'Assets.xcassets'
+     assets.mkdir()
+     (assets / 'Contents.json').write_text(json.dumps({'info': {'author': 'xcode', 'version': 1}}))
+diff --git a/dm/ios/tools/project_sdk.py b/dm/ios/tools/project_sdk.py
+new file mode 100644
+index 0000000..a9c14f6
+--- /dev/null
++++ b/dm/ios/tools/project_sdk.py
+@@ -0,0 +1,28 @@
++#!/usr/bin/env python3
++"""Write an iOS project template (project.yml, project-framework.yml) for another SDK of DM_SDK.
++
++Usage: project_sdk.py <sdk> <template> <out>
++  iphoneos  the template as it is
++  xros      visionOS: every target's platform, the deployment target and device family 7 (Apple Vision)
++The templates stay the iOS ones: build_ipa.sh and build_smoke.py write the visionOS project from them, so a change
++to a template reaches both platforms. A template this does not recognise is an error, not a silent iOS project."""
++import re, sys
++
++SDKS = ('iphoneos', 'xros')
++
++
++def convert(text, sdk):
++    if sdk == 'iphoneos': return text
++    if sdk != 'xros': raise ValueError(f'DM_SDK={sdk}: one of {", ".join(SDKS)}')
++    for pattern, new in ((r'^(\s+)iOS: "(\d+\.\d+)"', r'\1visionOS: "\2"'), (r'^(\s+)platform: iOS$', r'\1platform: visionOS'),
++                         (r'TARGETED_DEVICE_FAMILY: "1,2"', 'TARGETED_DEVICE_FAMILY: "7"')):
++        text, n = re.subn(pattern, new, text, flags=re.M)
++        if not n: raise ValueError(f'no line matches {pattern!r}')
++    return text
++
++
++if __name__ == '__main__':
++    if len(sys.argv) != 4: sys.exit(__doc__)
++    try: out = convert(open(sys.argv[2], encoding='utf-8').read(), sys.argv[1])
++    except ValueError as e: sys.exit(f'project_sdk.py: {sys.argv[2]}: {e}')
++    open(sys.argv[3], 'w', encoding='utf-8').write(out)

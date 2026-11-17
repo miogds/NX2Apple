@@ -18,12 +18,16 @@
 #   DM_XCODE_DERIVED_DATA  derived data (default SHELL_DIR/dd), FONT_PY / STD_FONT as for build_ipa.sh
 #   DM_GAMES_DIR         passed through, for a provisional game profile
 #   DM_ENTITLEMENTS      empty: no Increased Memory Limit request in the prepared project (default: requested, as build_ipa.sh does)
+#   DM_SDK               iphoneos (default) or xros: the same shell for visionOS (the project's platform, visionOS 27.1 as the package's
+#                        minimum, device family 7). The games' frameworks must be built for the same SDK (build_ipa.sh DM_SDK)
 set -u
 SHELL_ROOT=$(cd "$(dirname "$0")" && pwd) || exit 1
 DEFAULT_PKG=$(cd "$SHELL_ROOT/.." && pwd) || exit 1
 REPO_ROOT=$(cd "$DEFAULT_PKG/.." && pwd) || exit 1
 t() { echo "[$(date +%T)] $*"; }; die() { t "FAIL: $*"; exit 1; }
 MODE=${1:-}; case "$MODE" in --prepare-xcode|--build) ;; *) die "usage: $0 --prepare-xcode | --build";; esac
+export DM_SDK=${DM_SDK:-iphoneos}
+case "$DM_SDK" in iphoneos) OS_NAME=iOS;; xros) OS_NAME=visionOS;; *) die "DM_SDK=$DM_SDK: iphoneos or xros";; esac
 [ -n "${SHELL_DIR:-}" ] || die "SHELL_DIR is not set: the shell's project folder"
 [ -n "${DM_SHELL_FRAMEWORKS:-}" ] || die "DM_SHELL_FRAMEWORKS is not set: the games' framework folders, one per line"
 mkdir -p "$SHELL_DIR" || die "mkdir $SHELL_DIR"; S=$(cd "$SHELL_DIR" && pwd)
@@ -112,6 +116,13 @@ for line in open(template, encoding='utf-8').read().splitlines():
                 lines.append(f'{pad}CFBundleLocalizations: [' + ', '.join(['en', *_locs]) + ']')
                 continue
     lines.append(line)
+if os.environ.get('DM_SDK') == 'xros':   # the same project for visionOS: its platform, the package's minimum (frontend-ios/Package.swift) and device family 7
+    text = '\n'.join(lines)
+    for old, new in (('    iOS: "26.0"', '    visionOS: "27.1"'), ('    platform: iOS', '    platform: visionOS'),
+                     ('TARGETED_DEVICE_FAMILY: "1,2"', 'TARGETED_DEVICE_FAMILY: "7"')):
+        if text.count(old) != 1: sys.exit(f'[RED] project-shell.yml: expected one {old.strip()!r}')
+        text = text.replace(old, new)
+    lines = text.split('\n')
 if not done: sys.exit('[RED] project-shell.yml has no @FRAMEWORKS@ line')
 open(out, 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
 PY
@@ -127,11 +138,11 @@ if [ "$MODE" = --prepare-xcode ]; then
   exit 0
 fi
 
-t "xcodebuild (Release, unsigned, iPhone + iPad)"
-xcodebuild -project DmShell.xcodeproj -scheme DmShell -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$DD" \
+t "xcodebuild (Release, unsigned, $OS_NAME)"
+xcodebuild -project DmShell.xcodeproj -scheme DmShell -configuration Release -destination "generic/platform=$OS_NAME" -derivedDataPath "$DD" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= build > "$S/build.log" 2>&1 \
   || { grep -E 'error:' "$S/build.log" | head -20; die "xcodebuild, log $S/build.log"; }
-APP=$DD/Build/Products/Release-iphoneos/DmShell.app
+APP=$DD/Build/Products/Release-$DM_SDK/DmShell.app
 [ -x "$APP/DmShell" ] || die "no built app at $APP"
 while IFS=$'\t' read -r tid path name; do
   fw=$APP/Frameworks/$(basename "$path"); [ -d "$fw" ] || die "the app does not embed $(basename "$path")"
