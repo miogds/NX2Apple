@@ -1,0 +1,301 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: miogds <miogds@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 16:57:47 +0100
+Subject: [PATCH] nsp script: --platform visionos builds a game for Apple
+ Vision Pro
+
+The 'ios' build with visionOS libraries and folders of its own:
+
+- the device's shader libraries are compiled through dm/ios/tools/
+  xros_metal.py (own_compilers.py for an NVN game, vk_shaders.py or
+  gl_shaders.py otherwise) into sh/xros, not sh/ios;
+- build_ipa.sh gets DM_SDK=xros and works in ipa-xros, xcode-xros and
+  xcode-derived-data-xros;
+- the default output is <the profile's IPA>-visionOS.ipa;
+- the visionOS SDK is checked with the other prerequisites.
+
+An iPhone build of the same game in the same work folder keeps its
+libraries, its project and its IPA. DM_SDK from the shell is not passed
+on: the platform is the script's option.
+
+dm/tools/tests/test_nsp_visionos.py: the option, the wrapper only for
+visionOS, the output name, and the Vulkan and GL shader steps' command and
+folder for both platforms. Not run on a game: there is none here.
+
+Upstream-Status: fork-only
+Reason: visionOS is outside upstream's support matrix: the NSP script builds a game for it with --platform visionos
+Issue: none yet (miogds/NX2Apple, visionOS evaluation branch; to be filed before this goes to LNPANDY/NX2Apple)
+
+---
+ dm/tools/tests/test_nsp_visionos.py | 71 +++++++++++++++++++++++++++++
+ scripts/build_ipa_from_nsp.py       | 61 +++++++++++++++++--------
+ 2 files changed, 114 insertions(+), 18 deletions(-)
+ create mode 100644 dm/tools/tests/test_nsp_visionos.py
+
+diff --git a/dm/tools/tests/test_nsp_visionos.py b/dm/tools/tests/test_nsp_visionos.py
+new file mode 100644
+index 0000000..86d7adf
+--- /dev/null
++++ b/dm/tools/tests/test_nsp_visionos.py
+@@ -0,0 +1,71 @@
++"""scripts/build_ipa_from_nsp.py --platform visionos: the 'ios' build with visionOS shader libraries and folders of its own."""
++from pathlib import Path
++import sys
++import types
++import unittest
++from unittest import mock
++
++from test_nsp_incremental import Base, REPO, game, nsp
++
++
++class Helpers(unittest.TestCase):
++    def test_the_platform_is_an_option(self):
++        self.assertEqual(nsp.parse_args(['--platform', 'visionos']).platform, 'visionos')
++
++    def test_chain_tools_run_through_the_visionos_wrapper_only_for_visionos(self):
++        tool = 'dm/gfx/tools/own_compilers.py'
++        self.assertEqual(nsp.chain_tool('py', REPO, tool), ['py', REPO / tool])
++        with mock.patch.object(nsp, 'VISION', True):
++            self.assertEqual(nsp.chain_tool('py', REPO, tool), ['py', REPO / 'dm/ios/tools/xros_metal.py', REPO / tool])
++        self.assertTrue((REPO / 'dm/ios/tools/xros_metal.py').is_file())
++
++    def test_the_default_ipa_never_replaces_the_iphone_one(self):
++        g = types.SimpleNamespace(get=lambda key: {'ipa': 'Game.ipa'}[key])
++        self.assertEqual(nsp.device_ipa(g), 'Game.ipa')
++        with mock.patch.object(nsp, 'VISION', True):
++            self.assertEqual(nsp.device_ipa(g), 'Game-visionOS.ipa')
++
++
++class LayerShadersForVisionOS(Base):
++    def build(self, api, vision):
++        """One Vulkan or GL shader step for a device → (the command, the folder returned)."""
++        self.derive(); g = game.Game(self.pdir)
++        logs = self.tmp / f'logs-{api}-{vision}'; logs.mkdir(); cmds = []
++        sh = self.tmp / f'sh-{api}-{vision}'
++        def translate(cmd, log, **kw):
++            cmds.append([str(c) for c in cmd])
++            ios = Path(cmd[cmd.index('--ios') + 1]); mac = Path(cmd[cmd.index('--ios') - 1])
++            for d in (mac, ios):
++                (d / api).mkdir(parents=True); (d / api / f'{api}_shaders.metallib').write_bytes(b'library')
++            Path(log).write_text('macosx: 1\niphoneos: 1\n')
++        roots = [self.ex / 'RomFS'] + ([self.ex / 'ExeFS/main'] if api == 'gl' else [])
++        build = nsp.build_vk_shaders if api == 'vk' else nsp.build_gl_shaders
++        with mock.patch.object(nsp, 'run', side_effect=translate), mock.patch.object(nsp, 'toolchain', return_value=()), \
++             mock.patch.object(nsp.shutil, 'which', return_value='/glslangValidator'), \
++             mock.patch.object(nsp.subprocess, 'run', return_value=mock.Mock(stdout='compiler', stderr='')), \
++             mock.patch.object(nsp, 'VISION', vision), mock.patch.object(nsp, 'IOS_LIBS', 'xros' if vision else 'ios'):
++            out = build(sys.executable, REPO, roots, sh, {'WORK': str(self.tmp), 'PATH': ''}, logs, g, mac=False)
++        self.assertEqual(len(cmds), 1)
++        return cmds[0], sh, out
++
++    def test_the_libraries_go_to_a_folder_of_their_own_through_the_wrapper(self):
++        for api in ('vk', 'gl'):
++            with self.subTest(api=api):
++                cmd, sh, out = self.build(api, True)
++                self.assertEqual(cmd[1], str(REPO / 'dm/ios/tools/xros_metal.py'))
++                self.assertEqual(cmd[2], str(REPO / f'dm/gfx/tools/{api}_shaders.py'))
++                self.assertEqual(cmd[cmd.index('--ios') + 1], str(sh / 'xros'))
++                self.assertEqual(out, sh / 'xros')
++                self.assertFalse((sh / 'ios').exists())
++
++    def test_an_iphone_build_runs_the_tool_itself_into_ios(self):
++        for api in ('vk', 'gl'):
++            with self.subTest(api=api):
++                cmd, sh, out = self.build(api, False)
++                self.assertEqual(cmd[1], str(REPO / f'dm/gfx/tools/{api}_shaders.py'))
++                self.assertEqual(cmd[cmd.index('--ios') + 1], str(sh / 'ios'))
++                self.assertEqual(out, sh / 'ios')
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/scripts/build_ipa_from_nsp.py b/scripts/build_ipa_from_nsp.py
+index 20ceb97..4e00ac8 100755
+--- a/scripts/build_ipa_from_nsp.py
++++ b/scripts/build_ipa_from_nsp.py
+@@ -68,6 +68,22 @@ SHADER_FILES = False                    # True = an NVN game's shader library go
+                                         #   then need ROMFS 'separate' too). False = the library is one file, which installs faster and other install tools take whatever its size
+ PREPARE_XCODE = False                   # prepare a per-game Xcode project and add it to the workspace instead of packing an IPA; requires KEEP_EXTRACTED
+ PLATFORM = 'ios'                        # 'ios' = the IPA (or the Xcode project); 'mac-app' = a double-clickable Mac app of the game; 'mac' = development: build only what running the game on this Mac needs (Mac shaders, the Mac host), no iOS shaders,
++# --platform visionos (PLATFORM 'visionos'): the 'ios' build for Apple Vision Pro. main() sets these: the device's shader libraries go to sh/xros (compiled through
++# dm/ios/tools/xros_metal.py, the chain's tools with a visionOS target), the app build to ipa-xros, xcode-xros and xcode-derived-data-xros, and build_ipa.sh gets DM_SDK=xros,
++# so an iPhone build of the same game in the same work folder keeps its libraries, its project and its IPA
++VISION = False
++IOS_LIBS, IPA_WORK, XCODE_DIR, XCODE_DD = 'ios', 'ipa', 'xcode', 'xcode-derived-data'
++
++
++def chain_tool(py, repo, tool):
++    """The command of one of the shader chain's tools, which compiles the device's libraries for the iPhone, or through xros_metal.py for visionOS."""
++    return [py, repo / 'dm/ios/tools/xros_metal.py', repo / tool] if VISION else [py, repo / tool]
++
++
++def device_ipa(g):   # the output's default name: the profile's IPA, marked for visionOS so it never replaces the iPhone's
++    name = g.get('ipa')
++    return (name[:-4] + '-visionOS.ipa' if name.endswith('.ipa') else name + '-visionOS') if VISION else name
++
+                                         #   Xcode project or IPA; keeps the extracted files and prints the command that runs the game (needs Apple silicon)
+ MAC_SIGN = ''                            # PLATFORM 'mac-app': the codesign identity for the app, e.g. 'Developer ID Application: <name> (<team>)' (empty = ad-hoc); never with the hardened runtime
+ TEAM_ID = ''                            # optional Apple team ID (empty = DM_TEAM_ID environment, saved Xcode selection, sole local Apple Development cert on Xcode prepare, or select in Xcode)
+@@ -1456,7 +1472,10 @@ def check_prereqs(env, xlate, mac=False):   # mac: a Mac-only build (PLATFORM 'm
+     if mac: del tools['xcodegen']
+     gone = [f'{t} ({how})' for t, how in tools.items() if not shutil.which(t, path=env['PATH'])]
+     if gone: raise BuildError('tools not found: ' + ', '.join(gone))
+-    if not mac: check_ios_sdk(env)   # before the Metal check, whose message would blame the Metal toolchain
++    if not mac: check_ios_sdk(env)
++    if VISION and subprocess.run(['xcrun', '--sdk', 'xros', '--show-sdk-version'], capture_output=True, text=True, env=env).returncode:
++        raise BuildError('the visionOS SDK is not installed: install the visionOS platform in Xcode → Settings → Components, or with xcodebuild -downloadPlatform visionOS')
++    # the iOS SDK check comes before the Metal check, whose message would blame the Metal toolchain
+     mtl = subprocess.run(['xcrun', '-sdk', 'macosx' if mac else 'iphoneos', 'metal', '--version'], capture_output=True, text=True, env=env)   # Xcode 26 and later install the Metal toolchain separately
+     if mtl.returncode: raise BuildError(f'the Metal compiler does not run ({(mtl.stderr.strip().splitlines() or ["no output"])[-1]}): install it with xcodebuild -downloadComponent MetalToolchain')
+     if not xlate.exists(): raise BuildError(f'the shader translator is missing from the repository: {xlate}')
+@@ -2319,7 +2338,7 @@ def chain_tables(py, repo, sh, env, logs, g, chain):
+     want = lib_head(lib)
+     staged = sh / 'tables'
+     if not want:
+-        want = lib_head(sh / 'ios' / f'b-{chain}')
++        want = lib_head(sh / IOS_LIBS / f'b-{chain}')
+         if not want: return False
+         for name, _, _ in CHAIN_TABLES:
+             p = g.table(name)
+@@ -2730,8 +2749,8 @@ def prune_stale_chains(sh, chain):
+     b-<12 hex digits> go (the key files with .key, the Mac's with a mac- prefix), never another entry. A removal that fails is a [RED] line, not an error: the build is done, and the next one tries
+     again. Returns the chain versions removed"""
+     def listing(d, pat): return [d / n for n in (os.listdir(d) if d.is_dir() else []) if re.fullmatch(pat, n) and n not in (f'b-{chain}', f'b-{chain}.img', f'b-{chain}.key', f'mac-b-{chain}.key')]
+-    old = [p for d in (sh / 'cache', sh / 'ios') for p in listing(d, r'b-[0-9a-f]{12}') if p.is_dir()]
+-    old += [p for d, pat in ((sh / 'ios', r'b-[0-9a-f]{12}\.key'), (sh, r'mac-b-[0-9a-f]{12}\.key'), (sh / 'cache', r'b-[0-9a-f]{12}\.img(\.part)?'), (sh / 'ios', r'b-[0-9a-f]{12}\.img(\.part)?')) for p in listing(d, pat) if p.is_file()]
++    old = [p for d in (sh / 'cache', sh / IOS_LIBS) for p in listing(d, r'b-[0-9a-f]{12}') if p.is_dir()]
++    old += [p for d, pat in ((sh / IOS_LIBS, r'b-[0-9a-f]{12}\.key'), (sh, r'mac-b-[0-9a-f]{12}\.key'), (sh / 'cache', r'b-[0-9a-f]{12}\.img(\.part)?'), (sh / IOS_LIBS, r'b-[0-9a-f]{12}\.img(\.part)?')) for p in listing(d, pat) if p.is_file()]
+     gone, size = [], 0
+     for p in old:
+         try: n = tree_size(p)[1] if p.is_dir() else p.stat().st_size; retire(sh.parent, p)
+@@ -2800,7 +2819,7 @@ def pack_libraries(sh, chain, pull=None):
+     """Each finished library folder as one file, which the host and the tools read in place (shader_lib.py). pull False: nothing reads the iPhone's pulling libraries (ios_wants_pulling), which stay out of its
+     image, so the IPA packs that file as it is and reuses it. A build that wants them again compiles them"""
+     shader_lib.pack(sh / 'cache' / f'b-{chain}', say)
+-    shader_lib.pack(sh / 'ios' / f'b-{chain}', say, leave_out=pull is False)
++    shader_lib.pack(sh / IOS_LIBS / f'b-{chain}', say, leave_out=pull is False)
+ 
+ 
+ def ios_gpus(gpu_option, g):
+@@ -2829,7 +2848,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
+     per-shader cache (DMSH_CAS) is the full build's, so a later full build reuses this work. It gets no stamp and no c1_full.tsv or cb_extent.tsv, on purpose: beside a stamp the host would take the tables'
+     silence on a shader the partial build never saw as proof it is safe (no chain_tables, no shader_regressions, no pruning; the host logs the missing stamp in red at each start)
+     pull: an iPhone build's ios_wants_pulling. False neither compiles the pulling libraries nor keeps them in its image; True does not reuse an image without them"""
+-    ios, log = sh / 'ios', logs / 'dmsh_build.log'
++    ios, log = sh / IOS_LIBS, logs / 'dmsh_build.log'
+     PROG.stage('Mac shaders' if mac else 'iOS shaders')
+     chain = chain_of(repo)
+     shader_cache.adopt(sh / 'cache/cas', shader_cache.chain_file(sh / 'cache', chain), say)
+@@ -2904,7 +2923,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
+         if not seen:   # the run's folder replaces the library: a stopped build keeps no old shaders under the same chain, as dmsh_build.py removes a folder's
+             shader_lib.remove_image(sh / 'cache' / f'b-{chain}')
+             if not mac: shader_lib.remove_image(ios / f'b-{chain}')
+-        run([py, repo / 'dm/gfx/tools/own_compilers.py', sh / 'pkg', out if seen else sh / 'cache', *(seen or ())], log, env=benv)
++        run(chain_tool(py, repo, 'dm/gfx/tools/own_compilers.py') + [sh / 'pkg', out if seen else sh / 'cache', *(seen or ())], log, env=benv)
+     finally:
+         PROG.watch(None)
+         if prefill_tmp is not None: rmtree(prefill_tmp)
+@@ -2967,7 +2986,7 @@ def layer_shaders(py, repo, api, name, roots, sh, key, logs, env, mac, from_seed
+     Returns the folder the host (DM_MSL_DIR) or build_ipa.sh (MSL_IOS) takes the libraries from. key: the inputs' fingerprint (None never reuses). The iOS libraries' key is sh/ios/<api>.key,
+     the Mac's sh/<api>.key, which an iOS build writes too (it builds both), so a Mac-only build is reused after either; an iOS build after a Mac-only one translates again.
+     Otherwise the old output is deleted first, so a failed run leaves nothing for build_ipa.sh or the host to pick up; the translator's temporary files go to WORK (on the NSP folder's volume)"""
+-    ios = sh / 'ios'; out = sh if mac else ios
++    ios = sh / IOS_LIBS; out = sh if mac else ios
+     kf, kmac, lib, log = ios / f'{api}.key', sh / f'{api}.key', out / api / f'{api}_shaders.metallib', logs / f'{api}_shaders.log'
+     note = next((n for k in ((kmac, kf) if mac else (kf,)) if (n := reused(k, key)) is not None), None) if key else None
+     has_romfs = bool(roots) and Path(roots[0]).exists()
+@@ -2983,7 +3002,7 @@ def layer_shaders(py, repo, api, name, roots, sh, key, logs, env, mac, from_seed
+     PROG.set(step='translating')
+     rmtree(kmac); rmtree(sh / api)
+     if not mac: rmtree(kf); rmtree(ios / api)
+-    run([py, repo / f'dm/gfx/tools/{api}_shaders.py', *roots, sh] + ([] if mac else ['--ios', ios]), log, env=dict(env, TMPDIR=env['WORK']))
++    run(chain_tool(py, repo, f'dm/gfx/tools/{api}_shaders.py') + [*roots, sh] + ([] if mac else ['--ios', ios]), log, env=dict(env, TMPDIR=env['WORK']))
+     if not lib.is_file(): raise BuildError(f'no {"Mac" if mac else "iOS"} {name} shader library in {lib.parent}')
+     m = re.search(r'macosx: (\d+)' if mac else r'iphoneos: (\d+)', log.read_text(errors='replace'))
+     note = f'{int(m.group(1)):,} shaders for the Mac' + ('' if mac else ' and iOS') if m else ''
+@@ -3556,7 +3575,7 @@ def parse_args(argv):
+     ap.add_argument('--shell-framework', metavar='FOLDER', help='route C\'s shell (docs/launcher-c-plan.md M2): build only the game\'s framework, FOLDER/DmGame<title ID>.framework '
+                     '(its code, tables, settings list, shader libraries and icon), for dm/ios/tools/build_shell.sh to embed in the one app for all games; no IPA or Xcode project, '
+                     'the game files stay separate (implies --romfs separate and --keep-extracted)')
+-    ap.add_argument('--platform', choices=('ios', 'mac', 'mac-app'), help='ios = the IPA (or the Xcode project); mac = for development: build only what running the game on this Mac needs (the Mac shaders and the Mac host, '
++    ap.add_argument('--platform', choices=('ios', 'visionos', 'mac', 'mac-app'), help='ios = the IPA (or the Xcode project); visionos = the same for Apple Vision Pro (visionOS shader libraries, DM_SDK=xros); mac = for development: build only what running the game on this Mac needs (the Mac shaders and the Mac host, '
+                     'no iOS shaders, Xcode project or IPA), keep the extracted files and print the command that runs the game; mac-app = what mac builds, then a self-contained, double-clickable '
+                     'Mac app of the game (default: <game name>.app in the NSP folder, -o names another) (default: the PLATFORM setting, ios)')
+     ap.add_argument('--icon', help='the app icon, a JPEG or PNG of any size (default: the ICON setting, else the game\'s icon from its control data; a dump has none, a NUP may have none)')
+@@ -4051,7 +4070,11 @@ def main(args=None):
+     repo = find_repo(here)
+     prepare_xcode = args.prepare_xcode or PREPARE_XCODE
+     platform = args.platform or PLATFORM
+-    if platform not in ('ios', 'mac', 'mac-app'): raise BuildError(f'PLATFORM / --platform must be ios, mac or mac-app: {platform}')
++    if platform not in ('ios', 'visionos', 'mac', 'mac-app'): raise BuildError(f'PLATFORM / --platform must be ios, visionos, mac or mac-app: {platform}')
++    global VISION, IOS_LIBS, IPA_WORK, XCODE_DIR, XCODE_DD
++    VISION = platform == 'visionos'   # the 'ios' build with visionOS libraries and DM_SDK=xros (set again on every call: tests call main more than once)
++    IOS_LIBS, IPA_WORK, XCODE_DIR, XCODE_DD = ('xros', 'ipa-xros', 'xcode-xros', 'xcode-derived-data-xros') if VISION else ('ios', 'ipa', 'xcode', 'xcode-derived-data')
++    if VISION: platform = 'ios'
+     mac = platform in ('mac', 'mac-app')   # the Mac's shaders and host only: no iOS shaders, Xcode project or IPA (mac_run prints the command; mac-app packs a Mac app, mac_app)
+     mac_pack = platform == 'mac-app'
+     seen_shaders = SEEN_SHADERS if args.seen_shaders is None else args.seen_shaders
+@@ -4092,6 +4115,8 @@ def main(args=None):
+     want_lang = language_code(lang_in) if lang_in else 'en-US'
+     if not want_lang: raise BuildError(f'unknown game language {lang_in!r}; give one of {language_list([c for c, _ in nacp.LANGUAGES])}, by code or by name')
+     env = tool_env()
++    if VISION: env['DM_SDK'] = 'xros'   # build_ipa.sh, gen_build.py and the project templates (dm/ios/tools/project_sdk.py)
++    else: env.pop('DM_SDK', None)   # the platform is this script's to say, not the shell's
+     env.setdefault('USER', getpass.getuser())   # xcodegen fails without USER (Couldn't find current username)
+     env.setdefault('J', str(os.cpu_count() or 8))   # shader_split.py's and dmsh_build.py's workers (their default is 8)
+     py = sys.executable
+@@ -4127,12 +4152,12 @@ def main(args=None):
+         say(f'game profile: {g.id}{" (provisional: " + str(g.dir) + ")" if provisional else ""}')
+         if seen_shaders and not g.table('shader_seen.tsv').is_file():
+             raise BuildError(f'--seen-shaders: game profile {g.id} has no list of the shaders its playtests used ({g.table("shader_seen.tsv")}): build the whole map, without this option')
+-        out_ipa = Path(os.path.expanduser(args.out or OUT_IPA)).resolve() if (args.out or OUT_IPA) else work.parent / g.get('ipa')
++        out_ipa = Path(os.path.expanduser(args.out or OUT_IPA)).resolve() if (args.out or OUT_IPA) else work.parent / device_ipa(g)
+         if shadowed and not (args.out or OUT_IPA):
+             out_ipa = out_ipa.with_name(out_ipa.stem + '-provisional.ipa')
+         if mac_pack and (args.out or OUT_IPA) and out_ipa.suffix != '.app':
+             raise BuildError(f'the Mac app (-o / OUT_IPA) must end in .app: {out_ipa}')
+-        project = work / 'xcode/DmIOS.xcodeproj'
++        project = work / XCODE_DIR / 'DmIOS.xcodeproj'
+         workspace = Path(os.path.expanduser(args.xcode_workspace or XCODE_WORKSPACE)).resolve() if (args.xcode_workspace or XCODE_WORKSPACE) else nsp_dir.parent / 'NxNative.xcworkspace'
+         saved_signing = {}
+         say('Mac app: the Mac shaders and the Mac host, packed into a Mac app, with no iOS shaders, Xcode project or IPA' if mac_pack else 'Mac-only build for development: the Mac shaders and the Mac host, with no iOS shaders, Xcode project or IPA' if mac else f'building from build seed → {out_ipa}')
+@@ -4273,10 +4298,10 @@ def main(args=None):
+             if derived: say(f'{derived}: packing {pkg_ver} from a profile derived from it')
+         versions = [pkg_ver] if derived else need + ([pkg_ver] if pkg_ver not in need else [])
+         work = build_folder(args, nsp_dir, g.id); BUILD_FOLDERS.add(work)
+-        out_ipa = Path(os.path.expanduser(args.out or OUT_IPA)).resolve() if (args.out or OUT_IPA) else work.parent / g.get('ipa')   # by default next to the build folder (the NSP folder, beside the NSPs and <id>_build/, unless --work-dir moved it)
++        out_ipa = Path(os.path.expanduser(args.out or OUT_IPA)).resolve() if (args.out or OUT_IPA) else work.parent / device_ipa(g)   # by default next to the build folder (the NSP folder, beside the NSPs and <id>_build/, unless --work-dir moved it)
+         if shadowed and not (args.out or OUT_IPA): out_ipa = out_ipa.with_name(out_ipa.stem + '-provisional.ipa')   # never over the IPA of the game's real profile
+         if mac_pack and (args.out or OUT_IPA) and out_ipa.suffix != '.app': raise BuildError(f'the Mac app (-o / OUT_IPA) must end in .app: {out_ipa}')
+-        project = work / 'xcode/DmIOS.xcodeproj'
++        project = work / XCODE_DIR / 'DmIOS.xcodeproj'
+         workspace = Path(os.path.expanduser(args.xcode_workspace or XCODE_WORKSPACE)).resolve() if (args.xcode_workspace or XCODE_WORKSPACE) else nsp_dir.parent / 'NxNative.xcworkspace'
+         if prepare_xcode and workspace.suffix != '.xcworkspace': raise BuildError('--xcode-workspace must end in .xcworkspace')
+         saved_signing = {}
+@@ -4479,7 +4504,7 @@ def main(args=None):
+     if programs and romfs_mode == 'separate': raise BuildError('a game of several programs keeps its files in the app (ROMFS / --romfs bundle): Documents holds one RomFS image, one program\'s')
+     if not prepare_xcode and not shell_fw and free_gb(out_ipa.parent) < 5: raise BuildError(f'less than 5 GB free on the volume of {out_ipa.parent}')
+     say('preparing the Xcode project' if prepare_xcode else f'building the game framework for the shell → {shell_fw}' if shell_fw else f'building the IPA → {out_ipa}')
+-    ipa_env = dict(env, GAME=g.id, W=str(work / 'ipa'), PATCHED=str(patched), ROMFS=str(rfs.source(game)), MSL_IOS=str(ios), GFXAPI=gfx, FONT_PY=py, DM_DISPLAY_NAME=app_name, DM_BUNDLE_ID=bundle_id, AOC=str(aoc or ''), DM_XCODE_DERIVED_DATA=str(work / 'xcode-derived-data'), DM_TEAM_ID=team_id, DM_LANG=lang, CONTROL=str(control))
++    ipa_env = dict(env, GAME=g.id, W=str(work / IPA_WORK), PATCHED=str(patched), ROMFS=str(rfs.source(game)), MSL_IOS=str(ios), GFXAPI=gfx, FONT_PY=py, DM_DISPLAY_NAME=app_name, DM_BUNDLE_ID=bundle_id, AOC=str(aoc or ''), DM_XCODE_DERIVED_DATA=str(work / XCODE_DD), DM_TEAM_ID=team_id, DM_LANG=lang, CONTROL=str(control))
+     if prepare_xcode: ipa_env['DM_XCODE_PROJECT_DIR'] = str(project.parent)
+     if args.framework: ipa_env['DM_FRAMEWORK'] = '1'; say('route C: the game\'s modules go into DmIOS.app/Frameworks/DmGame.framework (DM_FRAMEWORK=1)')
+     separate = romfs_mode == 'separate'
+@@ -4518,7 +4543,7 @@ def main(args=None):
+     if shell_fw:   # route C's shell: the framework alone, which build_shell.sh embeds, while the game files stay where they are for the copy to the device
+         ipa_env['DM_FRAMEWORK_ONLY'] = str(shell_fw)
+         fw = shell_fw / f'DmGame{g.id.upper()}.framework'
+-        watch = IpaWatch(repo, work / 'ipa', fw)
++        watch = IpaWatch(repo, work / IPA_WORK, fw)
+         PROG.stage('game framework', poll=watch.poll, step='starting')
+         run(['bash', repo / 'dm/ios/tools/build_ipa.sh'], logs / 'build_framework.log', env=ipa_env, on_line=watch.line)
+         if not (fw / 'game.manifest.json').is_file(): raise BuildError(f'no game framework at {fw}')
+@@ -4547,7 +4572,7 @@ def main(args=None):
+         say('choose the game scheme in Xcode, select your Team and iPhone or iPad, then Run (Release)')
+         report_profile_status(g, reg, pkg_ver, derived, provisional, 'Xcode project', patched)
+         return
+-    watch = IpaWatch(repo, work / 'ipa', out_ipa)
++    watch = IpaWatch(repo, work / IPA_WORK, out_ipa)
+     PROG.stage('app build', poll=watch.poll, step='starting')   # build_ipa.sh's "pack IPA" line starts the stage "IPA pack"
+     xcode_data = work / 'ipa/build/ios/pkg/dd'   # one file between builds (tree_tar.py); the app in it goes into the IPA, so it is packed after
+     tree_tar.unpack(xcode_data, say)
