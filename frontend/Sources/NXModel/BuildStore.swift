@@ -88,6 +88,7 @@ func hop(_ body: @escaping @MainActor () -> Void) {
     nonisolated package static let outputKey = "buildOutputDirectory"
     nonisolated package static let targetKey = "buildTarget"
     nonisolated package static let bcOnCPUKey = "bcOnCPU"
+    nonisolated package static let visionTargetKey = "buildTargetVision"
     nonisolated package static let experimentalBuilderKey = "experimentalBuilder"
     nonisolated package static let experimentalBuilderPathKey = "experimentalBuilderPath"
     nonisolated package static let savedKeysKey = "savedKeysPath"
@@ -189,6 +190,10 @@ func hop(_ body: @escaping @MainActor () -> Void) {
     /// (A15/A16 and older): on a device that has it the GPU path is always better, so the switch
     /// is a compatibility option and defaults off. Passed as DM_PROF_TEX_BC_CPU through --env-file,
     /// which the host reads at start-up — no rebuild of the host needed.
+    /// The device target (`BuildTarget.ios`) builds for an Apple Vision Pro, not for an iPhone or iPad: the third target card.
+    @Published package var visionTarget: Bool {
+        didSet { defaults.set(visionTarget, forKey: Self.visionTargetKey) }
+    }
     @Published package var bcOnCPU: Bool {
         didSet { defaults.set(bcOnCPU, forKey: Self.bcOnCPUKey) }
     }
@@ -392,6 +397,7 @@ func hop(_ body: @escaping @MainActor () -> Void) {
         let savedTarget = BuildTarget.saved(defaults)
         target = savedTarget
         runningTarget = savedTarget
+        visionTarget = defaults.bool(forKey: Self.visionTargetKey)
         bcOnCPU = defaults.bool(forKey: Self.bcOnCPUKey)
         experimentalBuilder = ExperimentalBuilder.featureEnabled && defaults.bool(forKey: Self.experimentalBuilderKey)
         experimentalBuilderPath = defaults.string(forKey: Self.experimentalBuilderPathKey) ?? ""

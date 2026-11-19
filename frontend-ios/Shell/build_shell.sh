@@ -74,6 +74,13 @@ with open(out, 'w', encoding='utf-8') as f:
     for tid, p, name in rows: f.write(f'{tid}\t{p}\t{name}\n')
 PY
 export GAME=$(head -1 "$FWLIST" | cut -f1)
+# A framework runs on the platform it was built for only, and the shell embeds it without linking it, so one of the other platform would
+# pass the build and fail at Play. Refuse it here, by the platform its executable was linked for (a file without one is not checked)
+while IFS=$'\t' read -r tid path name; do
+  plat=$(xcrun vtool -show-build "$path/$(basename "$path" .framework)" 2> /dev/null | awk '$1 == "platform" { print $2; exit }')
+  case "$DM_SDK:$plat" in iphoneos:IOS|xros:VISIONOS|xros:XROS|*:) ;;
+    *) die "[RED] $name ($tid) was built for $plat, not for $OS_NAME. Build this game again for $OS_NAME.";; esac
+done < "$FWLIST"
 t "shell: $DM_SHELL_NAME ($DM_BUNDLE_ID), games: $(cut -f3 "$FWLIST" | paste -sd, -)"
 
 t "generate Gen/ (shared files, the project)"

@@ -32,7 +32,10 @@ extension BuildStore {
     /// The folder a first shell root would sit in: the output folder, else the game's folder.
     package var shellRootParent: String { effectiveOutputFolder }
     /// The shell folder of the install: the saved one, else next to the output folder (or the game's folder).
-    package var shellRoot: String { ShellLibrary.resolveRoot(defaults: defaults, parent: shellRootParent, home: home) }
+    /// An Apple Vision Pro has a shell folder of its own beside it (`DevicePlatform.root`): its frameworks run on visionOS only.
+    package var shellRoot: String { devicePlatform.root(ShellLibrary.resolveRoot(defaults: defaults, parent: shellRootParent, home: home)) }
+    /// The platform the shared app is built for: the target card's (iPhone / iPad, or Apple Vision Pro). The IPA export is the iPhone's.
+    package var devicePlatform: DevicePlatform { !exportsShell && visionTarget ? .visionos : .ios }
 
     /// Why the shell folder cannot be written (`nil`: it can), before an hour of building rather than at the last step.
     package func shellRootProblem() -> String? {

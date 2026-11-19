@@ -2,14 +2,16 @@ import Foundation
 
 /// An iPhone or iPad paired with this Mac (Xcode's `devicectl`), a target for installing a build directly.
 package struct AppleDevice: Identifiable, Equatable {
-    package init(id: String, name: String, model: String, os: String, reachable: Bool, transport: String = "") {
+    package init(id: String, name: String, model: String, os: String, reachable: Bool, transport: String = "", platform: DevicePlatform = .ios) {
     self.id = id; self.name = name; self.model = model; self.os = os; self.reachable = reachable; self.transport = transport
+    self.platform = platform
 }
     package let id: String          // the UDID
     package let name: String
     package let model: String
     package let os: String
     package let reachable: Bool     // connected now, by cable or the local network
+    package var platform = DevicePlatform.ios   // an Apple Vision Pro gets the visionOS build of the shared app
     package var transport = ""      // devicectl's connectionProperties.transportType: "wired" (cable), "localNetwork" (Wi-Fi), "" when not connected
 
     package var wired: Bool { transport == "wired" }
@@ -53,7 +55,7 @@ package struct XcodeTeam: Equatable {
 /// Xcode's own tools for devices and signing: `xcrun devicectl` and `security`. Nothing here signs or installs;
 /// it only reads what is paired and what can sign.
 package enum DeviceTools {
-    /// The paired physical iPhones and iPads, reachable ones first.
+    /// The paired physical iPhones, iPads and Apple Vision Pros, reachable ones first.
     /// `timeout` ends a listing that hangs (the Saves sheet asks with one), as no devices.
     package static func devices(xcrun: String = "/usr/bin/xcrun", timeout: TimeInterval? = nil,
                                 runner: ProcessRunner = SystemProcessRunner()) -> [AppleDevice] {
@@ -80,7 +82,7 @@ package enum DeviceTools {
             let software = new["software"] as? [String: Any] ?? [:]
             let state = new["state"] as? [String: Any] ?? [:]
             // A missing reality is physical: only a device that says "simulated" is left out.
-            guard hardware["reality"] as? String != "simulated", hardware["platform"] as? String == "iOS",
+            guard hardware["reality"] as? String != "simulated", let platform = DevicePlatform(devicectl: hardware["platform"] as? String),
                   connection["pairingState"] as? String == "paired",
                   let udid = hardware["udid"] as? String, !udid.isEmpty else { return nil }
             // osVersionNumber is a string in the old block and {"stringValue": "26.2.1", ...} in `software`.
@@ -91,7 +93,7 @@ package enum DeviceTools {
                                model: hardware["marketingName"] as? String ?? "",
                                os: os,
                                reachable: connection["transportType"] is String,
-                               transport: connection["transportType"] as? String ?? "")
+                               transport: connection["transportType"] as? String ?? "", platform: platform)
         }
         return devices.sorted { ($0.reachable ? 0 : 1, $0.name) < ($1.reachable ? 0 : 1, $1.name) }
     }

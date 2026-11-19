@@ -24,7 +24,7 @@ enum BuildFolderPart: String, CaseIterable, Identifiable {
         switch base {
         case "extract", "exefs", "nsp": return .extracted
         case "shader", "pso": return .shaders
-        case "xcode", "xcode-derived-data", "ipa", "shell-framework": return .xcode
+        case "xcode", "xcode-derived-data", "ipa", "shell-framework", "shell-framework-xros", "ipa-xros", "xcode-xros", "xcode-derived-data-xros": return .xcode
         case "tools", "tmp", "aoc", "font": return .caches
         default:   // the rewritten modules and the NROs collected for them, one folder per packed version
             return base.hasPrefix("patched_") || base.hasPrefix("nro_") ? .caches : nil

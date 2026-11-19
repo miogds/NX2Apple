@@ -34,10 +34,45 @@ enum OnboardingNVN {
     }
 }
 
-enum OnboardingPlatform: String, CaseIterable {
-    case mac, iphone, both
-    var includesIOS: Bool { self != .mac }
-    var symbol: String { self == .mac ? "desktopcomputer" : (self == .iphone ? "iphone" : "laptopcomputer.and.iphone") }
+/// One place to play: a card of the platform step. The player picks one, two or all three.
+enum OnboardingPlace: String, CaseIterable {
+    case mac, iphone, vision
+    var symbol: String { self == .mac ? "desktopcomputer" : (self == .iphone ? "ipad.and.iphone" : "visionpro") }
+    var titleKey: String { "onboarding.platform.\(rawValue)" }
+    var noteKey: String { self == .mac ? "onboarding.platform.macNote" : (self == .vision ? "onboarding.platform.visionSize" : "onboarding.platform.iosSize") }
+}
+
+/// The places the player chose, never none. Stored as text: "mac", "iphone", "vision", or several joined by "+" in that order.
+/// "both" is what older versions stored for this Mac and an iPhone, and still reads and writes as that.
+struct OnboardingPlatform: Hashable {
+    var places: Set<OnboardingPlace>
+
+    static let mac = OnboardingPlatform(places: [.mac]), iphone = OnboardingPlatform(places: [.iphone])
+    static let vision = OnboardingPlatform(places: [.vision]), both = OnboardingPlatform(places: [.mac, .iphone])
+    /// The single places and the pair older versions knew, for the tests that walk the choices.
+    static let allCases: [OnboardingPlatform] = [.mac, .iphone, .vision, .both]
+
+    var ordered: [OnboardingPlace] { OnboardingPlace.allCases.filter(places.contains) }
+    var rawValue: String { self == .both ? "both" : ordered.map(\.rawValue).joined(separator: "+") }
+
+    init(places: Set<OnboardingPlace>) { self.places = places }
+    init?(rawValue: String) {
+        if rawValue == "both" { self = .both; return }
+        let found = rawValue.split(separator: "+").map { OnboardingPlace(rawValue: String($0)) }
+        guard !found.isEmpty, !found.contains(nil) else { return nil }
+        places = Set(found.compactMap { $0 })
+    }
+
+    /// The choice after a tap on a card: the place joins or leaves. The last place stays, so the choice is never empty.
+    func toggling(_ place: OnboardingPlace) -> OnboardingPlatform {
+        var next = places
+        if next.contains(place) { next.remove(place) } else { next.insert(place) }
+        return next.isEmpty ? self : OnboardingPlatform(places: next)
+    }
+
+    /// An Apple Vision Pro build needs the iOS platform too: the engine checks for it and compiles with the iPhone's Metal compiler.
+    var includesIOS: Bool { places.contains(.iphone) || places.contains(.vision) }
+    var includesVision: Bool { places.contains(.vision) }
 }
 
 /// The message is already localized by the driver. Details are a diagnostic log, never keys or file contents.
@@ -60,7 +95,7 @@ enum OnboardingTaskState: Equatable {
 }
 
 enum OnboardingSetupTask: String, CaseIterable {
-    case selected, license, firstLaunch, metal, ios
+    case selected, license, firstLaunch, metal, ios, vision
     var titleKey: String { "onboarding.setup.\(rawValue)" }
 }
 
@@ -146,7 +181,7 @@ struct OnboardingState: Equatable {
         return nil
     }
     var setupTasks: [OnboardingSetupTask] {
-        OnboardingSetupTask.allCases.filter { $0 != .ios || selectedPlatform?.includesIOS == true }
+        OnboardingSetupTask.allCases.filter { ($0 != .ios || selectedPlatform?.includesIOS == true) && ($0 != .vision || selectedPlatform?.includesVision == true) }
     }
     var backgroundReady: Bool { OnboardingBackgroundTask.allCases.allSatisfy { background[$0] == .done } }
     var backgroundFailed: Bool {

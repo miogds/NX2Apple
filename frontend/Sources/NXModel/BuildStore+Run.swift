@@ -354,7 +354,7 @@ extension BuildStore {
             if !nxbRun, RepoLayout.supportsFallbackIcon(repo.path) { args += macFallbackIconArguments(tidHex) }
         } else {
             // Only the game's framework: the one shared app is made and signed after the script (installShell)
-            args += ShellInstall.buildArguments(workDir: workDir, team: exportsShell ? "" : devices.signingTeam)
+            args += ShellInstall.buildArguments(workDir: workDir, team: exportsShell ? "" : devices.signingTeam, platform: devicePlatform)
         }
         // The archive step packs whatever folder the build reported, and without --work-dir that is the
         // script's default, which is the same workDir unless a separate output folder was chosen.
@@ -419,8 +419,8 @@ extension BuildStore {
                         // data's title ID, which the build key lacks when the file name has none (#515)
                         let key = self.buildKey
                         let name = self.gameName
-                        let fw = ShellInstall.builtFramework(workDir: self.effectiveWorkDir)
-                            ?? ShellInstall.frameworkPath(workDir: self.effectiveWorkDir, titleID: key)
+                        let fw = ShellInstall.builtFramework(workDir: self.effectiveWorkDir, platform: self.devicePlatform)
+                            ?? ShellInstall.frameworkPath(workDir: self.effectiveWorkDir, titleID: key, platform: self.devicePlatform)
                         let tid = ShellInstall.titleID(ofFramework: fw)
                         self.packArchive(workDir: self.effectiveWorkDir, titleID: tid) {
                             if self.deferShellPackaging { self.deferShellPackage(framework: fw, titleID: tid, name: name, archive: $0) }

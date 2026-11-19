@@ -531,7 +531,8 @@ extension BuildStore {
             cacheIDs.append(candidate)
         }
         for cacheID in cacheIDs {
-            let metaPath = workDir + "/shell-framework/.msl-cache/" + cacheID + ".json"
+            let container = builtFW.map { ($0 as NSString).deletingLastPathComponent } ?? workDir + "/shell-framework"
+            let metaPath = container + "/.msl-cache/" + cacheID + ".json"
             if let data = fm.contents(atPath: metaPath),
                let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
                 let libPath = (json["lib_path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

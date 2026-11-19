@@ -32,6 +32,7 @@ struct XcodeProbe: Equatable {
     var licenseAccepted = false
     var firstLaunchDone = false
     var version: String?            // from `xcodebuild -version` of appPath ("27.2"); nil when unreadable
+    var visionSDK = false           // `xcrun --sdk xros` answers: the visionOS platform is installed
     var developerDir: String? { appPath.map { $0 + "/Contents/Developer" } }
     var needsAdmin: Bool { !(selectedIsXcode && licenseAccepted && firstLaunchDone) }
 }
@@ -133,6 +134,7 @@ struct OnboardingEnvironment {
             if probe.selectedIsXcode {
                 probe.licenseAccepted = runner.runOK("/usr/bin/xcodebuild", ["-license", "check"])
                 probe.firstLaunchDone = runner.runOK("/usr/bin/xcodebuild", ["-checkFirstLaunchStatus"])
+                probe.visionSDK = runner.runOK("/usr/bin/xcrun", ["--sdk", "xros", "--show-sdk-version"])
             }
             return probe
         }.value
@@ -357,8 +359,11 @@ enum OnboardingLaunch {
         state.platform = .selected(platform)
         store(platform.rawValue, OnboardingDefaults.platform)   // before the detection below reads it
         if ephemeral { OnboardingDefaults.sessionPlatform = platform.rawValue }   // the detection reads it from here
-        let target: String? = platform == .mac ? "mac-app" : (platform == .iphone ? "ios" : nil)   // "both" leaves the target as it is
+        // This Mac alone, or devices alone, decides the build target. A choice with both leaves the target as it is
+        let target: String? = platform == .mac ? "mac-app" : (platform.places.contains(.mac) ? nil : "ios")
         if let target { if ephemeral { pendingTarget = target } else { model.target = target } }
+        // One kind of device decides which device card the Build page starts on
+        if !ephemeral, platform.places.contains(.iphone) != platform.places.contains(.vision) { model.visionTarget = platform.includesVision }
         updateWelcome()
         backgroundStarted = true
         spawn("platform") { d in
@@ -524,7 +529,8 @@ enum OnboardingLaunch {
         if !stores.dependencies.checked { await env.detectDeps(stores.dependencies) }
         probe = await env.xcodeProbe(); probed = true
         let (xcode, _) = OnboardingXcode.evaluate(probe: probe, metalReady: dep("metal")?.present ?? false,
-                                                  iosReady: dep("xcode")?.present ?? false, includesIOS: state.selectedPlatform?.includesIOS == true)
+                                                  iosReady: dep("xcode")?.present ?? false, includesIOS: state.selectedPlatform?.includesIOS == true,
+                                                  includesVision: state.selectedPlatform?.includesVision == true)
         if xcode != .ready { state.step = .xcode; persistStep() }
         updateWelcome()
     }
@@ -569,7 +575,8 @@ enum OnboardingLaunch {
         guard !xcodeBusy, state.exit == nil else { return }
         let includesIOS = state.selectedPlatform?.includesIOS == true
         let (xcode, setup) = OnboardingXcode.evaluate(probe: probe, metalReady: dep("metal")?.present ?? false,
-                                                      iosReady: dep("xcode")?.present ?? false, includesIOS: includesIOS)
+                                                      iosReady: dep("xcode")?.present ?? false, includesIOS: includesIOS,
+                                                      includesVision: state.selectedPlatform?.includesVision == true)
         state.setup = setup
         if case .failed = state.xcode, xcode != .ready && xcode != .disconnected { return }   // a failure stays until Retry
         if xcode == .missing {
@@ -634,6 +641,10 @@ enum OnboardingLaunch {
             let r = await download(.ios, Toolchain.iosPlatformCmd)
             if !r.ok { return fail("onboarding.error.ios", r.output) }
         }
+        if state.selectedPlatform?.includesVision == true, !(await env.xcodeProbe()).visionSDK {
+            let r = await download(.vision, Toolchain.visionPlatformCmd)
+            if !r.ok { return fail("onboarding.error.vision", r.output) }
+        }
         await env.detectDeps(stores.dependencies)
         xcodeBusy = false
         await refreshXcode()
@@ -671,7 +682,7 @@ enum OnboardingLaunch {
 
 /// The Xcode step's states from what was probed: a pure function, so the mapping is tested without a machine.
 enum OnboardingXcode {
-    static func evaluate(probe: XcodeProbe, metalReady: Bool, iosReady: Bool, includesIOS: Bool)
+    static func evaluate(probe: XcodeProbe, metalReady: Bool, iosReady: Bool, includesIOS: Bool, includesVision: Bool = false)
         -> (xcode: OnboardingState.Xcode, setup: [OnboardingSetupTask: OnboardingTaskState]) {
         if probe.selectedAppUnavailable { return (.disconnected, [:]) }
         guard probe.appPath != nil else { return (.missing, [:]) }
@@ -682,6 +693,7 @@ enum OnboardingXcode {
             .metal: metalReady ? .done : .queued,
         ]
         if includesIOS { setup[.ios] = iosReady ? .done : .queued }
+        if includesVision { setup[.vision] = probe.visionSDK ? .done : .queued }
         // A missing download counts like the three admin steps: Finish setup does all of it.
         return (setup.values.allSatisfy(\.isDone) ? .ready : .needsSetup, setup)
     }

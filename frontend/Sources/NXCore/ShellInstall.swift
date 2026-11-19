@@ -26,7 +26,7 @@ package enum ShellInstall {
     }
 
     package static func derivedData(root: String) -> String { root + "/derived-data" }
-    package static func appPath(root: String) -> String { derivedData(root: root) + "/Build/Products/Release-iphoneos/" + appName }
+    package static func appPath(root: String) -> String { derivedData(root: root) + "/Build/Products/" + DevicePlatform(root: root).productsFolder + "/" + appName }
 
     /// The folder that mirrors every game's framework inside the shell folder: a game survives its build folder's deletion here.
     package static func frameworksMirror(root: String) -> String { root + "/frameworks" }
@@ -42,26 +42,27 @@ package enum ShellInstall {
     }
 
     /// The framework the build script's `--shell-framework <folder>` writes for a game.
-    package static func frameworkPath(workDir: String, titleID: String) -> String {
-        workDir + "/shell-framework/DmGame\(titleID).framework"
+    package static func frameworkPath(workDir: String, titleID: String, platform: DevicePlatform = .ios) -> String {
+        workDir + "/" + platform.frameworkFolder + "/DmGame\(titleID).framework"
     }
 
     /// The framework the build wrote in `<work>/shell-framework`. The script names it after the title ID it read from the game
     /// data, which a file name without a title ID does not carry (the build key is then the name plus a hash, #515), so the
     /// handoff takes the folder's own `DmGame*.framework`: the newest when an older build left a second one. nil when there is none.
-    package static func builtFramework(workDir: String, fm: FileManager = .default) -> String? {
-        let folder = workDir + "/shell-framework"
-        let names = ((try? fm.contentsOfDirectory(atPath: folder)) ?? [])
-            .filter { $0.hasPrefix("DmGame") && $0.hasSuffix(".framework") && $0.count > "DmGame.framework".count }
-        func modified(_ name: String) -> Date {
-            ((try? fm.attributesOfItem(atPath: folder + "/" + name))?[.modificationDate] as? Date) ?? .distantPast
+    /// `platform` nil: the newest of either platform's folder (the steps after a build, which follow whatever it made).
+    package static func builtFramework(workDir: String, platform: DevicePlatform? = nil, fm: FileManager = .default) -> String? {
+        let folders = (platform.map { [$0.frameworkFolder] } ?? DevicePlatform.frameworkFolders).map { workDir + "/" + $0 }
+        let paths = folders.flatMap { folder in
+            ((try? fm.contentsOfDirectory(atPath: folder)) ?? [])
+                .filter { $0.hasPrefix("DmGame") && $0.hasSuffix(".framework") && $0.count > "DmGame.framework".count }.map { folder + "/" + $0 }
         }
-        return names.max { (modified($0), $0) < (modified($1), $1) }.map { folder + "/" + $0 }
+        func modified(_ path: String) -> Date { ((try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date) ?? .distantPast }
+        return paths.max { (modified($0), ($0 as NSString).lastPathComponent) < (modified($1), ($1 as NSString).lastPathComponent) }
     }
 
     /// The part of the build script's argument list that makes the game's framework instead of an Xcode project.
-    package static func buildArguments(workDir: String, team: String) -> [String] {
-        ["--shell-framework", workDir + "/shell-framework"] + (team.isEmpty ? [] : ["--team-id", team])
+    package static func buildArguments(workDir: String, team: String, platform: DevicePlatform = .ios) -> [String] {
+        platform.scriptArguments + ["--shell-framework", workDir + "/" + platform.frameworkFolder] + (team.isEmpty ? [] : ["--team-id", team])
     }
 
     // ---- 4: the project ----
@@ -92,7 +93,7 @@ package enum ShellInstall {
         if let tmp { env["TMPDIR"] = tmp }
         if let package { env["DM_SHELL_PACKAGE"] = package }
         if let engine { env["DM_ENGINE_DIR"] = engine }
-        return env
+        return env.merging(DevicePlatform(root: root).environment) { _, sdk in sdk }
     }
 
     // ---- 5 and 6: sign, build, install ----
