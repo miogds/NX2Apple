@@ -20,7 +20,7 @@ extension LauncherView {
             : (game.primary == .play ? loc.t("library.play")
                 : (game.primary == .openOnDevice ? String(format: loc.t("dev.open"), devices.deviceName(game.installedDevice))
                     : loc.t("library.setUpBuild")))
-        let symbol = game.primary == .play ? "play.fill" : (game.primary == .openOnDevice ? "iphone" : "hammer.fill")
+        let symbol = game.primary == .play ? "play.fill" : (game.primary == .openOnDevice ? game.deviceSymbol : "hammer.fill")
         let button = Button { primaryAction(game) } label: {
             LauncherHeroActionLabel(title: title, symbol: symbol, loading: macStarting)
         }
