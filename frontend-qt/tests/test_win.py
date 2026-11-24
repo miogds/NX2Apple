@@ -2927,6 +2927,10 @@ class WindowsBuildFixesTest(unittest.TestCase):
             import capstone  # noqa: F401
         except ImportError:
             self.skipTest('lz4 and capstone required')
+        # _make_nso0 puts a zlib stand-in into sys.modules when lz4 is missing. Its output is not LZ4, and the engine's
+        # nso.py rejects a segment that claims more than 255 bytes per stored byte, so this test needs the real module
+        if not getattr(lz4, '__file__', None):
+            self.skipTest('the real lz4 is required, not the zlib stand-in of another test')
         patch_nso = QT.parent / 'engine/dm/tools/patch_nso.py'
         if not patch_nso.is_file():
             self.skipTest('engine/ is missing')
