@@ -9,6 +9,8 @@
 # Environment:
 #   SHELL_DIR            the shell's project folder (required, outside frontend-ios: Gen/, the project, derived data)
 #   DM_SHELL_FRAMEWORKS  the games' framework folders, one per line (required, at least one, <folder>/DmGame<title ID>.framework)
+#   DM_SHELL_EMPTY       1: an app with no game in it is meant (DM_SHELL_FRAMEWORKS may be empty). The app then gets every game from
+#                        the Mac that installed it: the game's signed framework and its data (frontend-ios DataDownloads.swift)
 #   DM_BUNDLE_ID         the shell's bundle ID (default org.nxnative.shell). Keep it for the life of the install: the same ID installed
 #                        over the existing app keeps its Documents (game data, saves) when it is signed again after 7 days
 #   DM_TEAM_ID           the signing team for the prepared project (default 0000000000, a placeholder)
@@ -29,7 +31,7 @@ MODE=${1:-}; case "$MODE" in --prepare-xcode|--build) ;; *) die "usage: $0 --pre
 export DM_SDK=${DM_SDK:-iphoneos}
 case "$DM_SDK" in iphoneos) OS_NAME=iOS;; xros) OS_NAME=visionOS;; *) die "DM_SDK=$DM_SDK: iphoneos or xros";; esac
 [ -n "${SHELL_DIR:-}" ] || die "SHELL_DIR is not set: the shell's project folder"
-[ -n "${DM_SHELL_FRAMEWORKS:-}" ] || die "DM_SHELL_FRAMEWORKS is not set: the games' framework folders, one per line"
+[ -n "${DM_SHELL_FRAMEWORKS:-}" ] || [ -n "${DM_SHELL_EMPTY:-}" ] || die "DM_SHELL_FRAMEWORKS is not set: the games' framework folders, one per line"
 mkdir -p "$SHELL_DIR" || die "mkdir $SHELL_DIR"; S=$(cd "$SHELL_DIR" && pwd)
 [ -n "${DM_SHELL_PACKAGE:-}" ] || DM_SHELL_PACKAGE=$DEFAULT_PKG
 export DM_SHELL_PACKAGE
@@ -57,8 +59,8 @@ FWLIST=$S/frameworks.txt
 python3 -I - "$FWLIST" <<'PY' || die "the frameworks in DM_SHELL_FRAMEWORKS (above)"
 import json, os, sys
 out = sys.argv[1]
-paths = [p.strip() for p in os.environ['DM_SHELL_FRAMEWORKS'].splitlines() if p.strip()]
-if not paths: sys.exit('[RED] no framework named')
+paths = [p.strip() for p in os.environ.get('DM_SHELL_FRAMEWORKS', '').splitlines() if p.strip()]
+if not paths and not os.environ.get('DM_SHELL_EMPTY'): sys.exit('[RED] no framework named')
 seen, rows = {}, []
 for p in paths:
     p = os.path.abspath(p)
@@ -81,7 +83,7 @@ while IFS=$'\t' read -r tid path name; do
   case "$DM_SDK:$plat" in iphoneos:IOS|xros:VISIONOS|xros:XROS|*:) ;;
     *) die "[RED] $name ($tid) was built for $plat, not for $OS_NAME. Build this game again for $OS_NAME.";; esac
 done < "$FWLIST"
-t "shell: $DM_SHELL_NAME ($DM_BUNDLE_ID), games: $(cut -f3 "$FWLIST" | paste -sd, -)"
+t "shell: $DM_SHELL_NAME ($DM_BUNDLE_ID), games: $([ -s "$FWLIST" ] && cut -f3 "$FWLIST" | paste -sd, - || echo none)"
 
 t "generate Gen/ (shared files, the project)"
 rm -f "$S/Sources" "$S/tools"
@@ -92,6 +94,11 @@ rm -rf Gen && mkdir -p Gen/dm/font || die "mkdir Gen"
 "${FONT_PY:-python3}" "$DM/tools/make_shared_fonts.py" Gen/dm/font "${STD_FONT:-/System/Library/Fonts/Supplemental/Arial Unicode.ttf}" > /dev/null \
   || die "make_shared_fonts.py (pip install fonttools, or FONT_PY=python with fontTools; STD_FONT=a TTF)"
 mkdir -p Gen/Assets.xcassets && printf '{"info":{"author":"xcode","version":1}}\n' > Gen/Assets.xcassets/Contents.json || die "asset catalog"
+# visionOS: Xcode builds an Icon Composer document (AppIcon.icon) for iOS only, so the app had no icon there. Its icon is an image
+# stack of three layers, rendered from the same artwork (tools/vision_icon.swift) and named AppIcon like the iOS one
+if [ "$DM_SDK" = xros ]; then
+  cp -R "$DM_SHELL_PACKAGE/AppIcon.solidimagestack" Gen/Assets.xcassets/ || die "the visionOS icon (frontend-ios/AppIcon.solidimagestack)"
+fi
 # The shell asks for the Increased Memory Limit capability, as the one-game app does; a framework cannot hold entitlements
 printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
   '<plist version="1.0"><dict><key>com.apple.developer.kernel.increased-memory-limit</key><true/></dict></plist>' > Gen/DmShell.entitlements || die "entitlements"
@@ -129,7 +136,7 @@ if os.environ.get('DM_SDK') == 'xros':   # the same project for visionOS: its pl
                      ('TARGETED_DEVICE_FAMILY: "1,2"', 'TARGETED_DEVICE_FAMILY: "7"')):
         if text.count(old) != 1: sys.exit(f'[RED] project-shell.yml: expected one {old.strip()!r}')
         text = text.replace(old, new)
-    lines = text.split('\n')
+    lines = [l for l in text.split('\n') if 'AppIcon.icon' not in l]   # the icon is Gen/Assets.xcassets/AppIcon.solidimagestack there
 if not done: sys.exit('[RED] project-shell.yml has no @FRAMEWORKS@ line')
 open(out, 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
 PY

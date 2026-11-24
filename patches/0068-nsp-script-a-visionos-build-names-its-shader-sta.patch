@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: miogds <miogds@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 10:22:01 +0100
+Subject: [PATCH] nsp script: a visionOS build names its shader stage visionOS
+ shaders
+
+--platform visionos compiles the device's shader libraries for visionOS
+(sh/xros), but its progress stage and the library count still said iOS.
+The stage is now 'visionOS shaders' and the count names visionOS, so a
+front end shows what is being built.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+
+Upstream-Status: fork-only
+Reason: visionOS is outside upstream's support matrix: the shader stage of a visionOS build says visionOS
+Issue: none yet (miogds/NX2Apple, visionOS evaluation branch; to be filed before this goes to LNPANDY/NX2Apple)
+
+---
+ scripts/build_ipa_from_nsp.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/scripts/build_ipa_from_nsp.py b/scripts/build_ipa_from_nsp.py
+index 4e00ac8..1af6849 100755
+--- a/scripts/build_ipa_from_nsp.py
++++ b/scripts/build_ipa_from_nsp.py
+@@ -2849,7 +2849,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
+     silence on a shader the partial build never saw as proof it is safe (no chain_tables, no shader_regressions, no pruning; the host logs the missing stamp in red at each start)
+     pull: an iPhone build's ios_wants_pulling. False neither compiles the pulling libraries nor keeps them in its image; True does not reuse an image without them"""
+     ios, log = sh / IOS_LIBS, logs / 'dmsh_build.log'
+-    PROG.stage('Mac shaders' if mac else 'iOS shaders')
++    PROG.stage('Mac shaders' if mac else 'visionOS shaders' if VISION else 'iOS shaders')
+     chain = chain_of(repo)
+     shader_cache.adopt(sh / 'cache/cas', shader_cache.chain_file(sh / 'cache', chain), say)
+     out = sh / 'partial' if seen else sh / 'cache' if mac else ios
+@@ -2928,7 +2928,7 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, pkg_key=None, mac=False, se
+         PROG.watch(None)
+         if prefill_tmp is not None: rmtree(prefill_tmp)
+     if not seen and not chain_tables(py, repo, sh, env, logs, g, chain): raise BuildError(f'no stamped Mac shader outputs in {sh / "cache" / f"b-{chain}"} (inputs.tsv): dmsh_build.py did not finish a full build')
+-    what = 'Mac' if mac else 'iOS'
++    what = 'Mac' if mac else 'visionOS' if VISION else 'iOS'
+     n = sum(1 for _ in shader_lib.view(libs).glob('*_b.metallib')) if shader_lib.exists(libs) else 0   # the image dmsh_build.py writes (a folder from an older chain)
+     if n == 0: raise BuildError(f'no {what} shader libraries in {libs}')
+     say(f'{n} {what} shader libraries ({libs})')

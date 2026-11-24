@@ -34,6 +34,9 @@ public struct ShellHostConfig: Sendable {
     /// Split-part byte size used by startup `DataParts.joinAll` (defaults to 512 MiB).
     public var joinPartSize: Int64
     var onJoinProgress: (@Sendable (DataParts.Progress) -> Void)?
+    /// Set by the app: the folder the downloads' state is kept in and the identifier of their background session. Nil (tests,
+    /// the demo): the library offers no download.
+    public var downloads: (stateFolder: URL, sessionID: String)?
 
     public init(gamesRoot: URL, appDataRoot: URL, hotFrameworksRoot: URL? = nil,
                 environment: HostEnvironment = HostEnvironment(), updateURL: URL? = nil,
@@ -116,6 +119,11 @@ public struct ShellHostConfig: Sendable {
     public private(set) var input = ShellInputLog()
     /// A short message the host view shows as an alert.
     public var notice: String?
+    /// Which games the library shows when the app has a Mac to download from: those whose data is on this device, or those
+    /// the Mac holds for it (ShellHostModel+Downloads.swift).
+    public var librarySource: LibrarySource = .device
+    /// Whether the Mac that installed the app answers, for the library's "On the Mac" side.
+    public internal(set) var macStatus: MacStatus = .none
     /// The log the host view shows in a read-only sheet.
     public var log: LogPresentation?
     /// Play is preparing the game's resources or handing over to the engine.
@@ -138,7 +146,7 @@ public struct ShellHostConfig: Sendable {
         var report: CloudSaveSyncCheck.Report
     }
 
-    @ObservationIgnored private let config: ShellHostConfig
+    @ObservationIgnored let config: ShellHostConfig
     @ObservationIgnored private let launcher: any GameLauncher
     @ObservationIgnored private let picker: any FolderPicker
     @ObservationIgnored private let adapter = GamepadAdapter()
@@ -158,8 +166,14 @@ public struct ShellHostConfig: Sendable {
     @ObservationIgnored private var romfsChecks: [URL: RomfsCheck] = [:]
     @ObservationIgnored private var startupJoinTask: Task<Void, Never>?
     @ObservationIgnored private var joinGeneration: UInt64 = 0
+    @ObservationIgnored private var joinRunning = false
     @ObservationIgnored private var joiningProgress: [String: DataParts.Progress] = [:]
     @ObservationIgnored private var looseClaimTask: Task<Void, Never>?
+    /// Game data this app downloads itself (ShellHostModel+Downloads.swift): the downloads, and what the Mac offers by title ID.
+    @ObservationIgnored var downloader: DataDownloader?
+    @ObservationIgnored var dataOffers: [String: DataOffer] = [:]
+    @ObservationIgnored var offersTask: Task<Void, Never>?
+    @ObservationIgnored var codeFetches: Set<String> = []
     @ObservationIgnored private var looseClaimGeneration: UInt64 = 0
     @ObservationIgnored private var pickGeneration: [String: UInt64] = [:]
     @ObservationIgnored private var pickedDataNotes: [String: String] = [:]
@@ -192,33 +206,7 @@ public struct ShellHostConfig: Sendable {
         shellChoices = Self.choices(of: shellSettings)
         globalPadMap = shellSettings.padMap
         padMerge = shellSettings.padMerge
-        // Off the main actor, it lists folders and may write GB: a file the Mac launcher sent in parts is joined first (#899), then
-        // the game files are kept out of the iCloud backup (#618), also what an earlier version put there. A joined file can make a
-        // game playable, so the library is read again.
-        let dataRoot = config.appDataRoot
-        let joinGen = joinGeneration
-        let partSize = config.joinPartSize
-        let progressHook = config.onJoinProgress
-        let reportProgress: @Sendable (DataParts.Progress) -> Void = { [weak self] progress in
-            Task { @MainActor in
-                self?.applyJoinProgress(progress, generation: joinGen)
-            }
-            progressHook?(progress)
-        }
-        let gamesRoot = config.gamesRoot
-        let hotRoot = config.hotFrameworksRoot
-        startupJoinTask = Task { [weak self] in
-            let joined = await Task.detached(priority: .utility) { () -> Bool in
-                let documents = dataRoot.deletingLastPathComponent()
-                DataParts.writeFeatures(documents: documents)
-                let joined = DataParts.joinAll(appDataRoot: dataRoot, partSize: partSize, onProgress: reportProgress)
-                let allEntries = GameCatalogue.scan(root: gamesRoot, hotRoot: hotRoot, gameDataRoot: dataRoot)
-                let claimed = LooseRomfsClaimer.claimAll(documents: documents, appDataRoot: dataRoot, entries: allEntries)
-                BackupExclusion.apply(appDataRoot: dataRoot)
-                return !joined.isEmpty || !claimed.isEmpty
-            }.value
-            self?.finishJoinRun(joined: joined, generation: joinGen)
-        }
+        startJoinRun()
         let expirationReader = config.provisioningExpiration
         let clock = config.now
         signingCheckTask = Task { [weak self] in
@@ -227,14 +215,14 @@ public struct ShellHostConfig: Sendable {
             self.signingWarning = ProvisioningProfile.warning(expiration: expiration, now: clock())
         }
         reload(afterClaim: true)
+        setUpDownloads()   // after the library is read: the Mac is asked about the games in it
         defaultsObserver = NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.defaultsDidChange() }
         }
         #if canImport(UIKit)
         foregroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, !self.launchingGame, !self.isDeepLinkLaunching else { return }
-                self.reload()
+                self?.returnedToFront()
             }
         }
         #endif
@@ -280,6 +268,47 @@ public struct ShellHostConfig: Sendable {
         await backupScanTask?.value
         for task in romfsChecks.values.compactMap(\.task) {
             await task.value
+        }
+    }
+
+    /// The app is in front again: the library is read again, and parts that arrived meanwhile are joined.
+    func returnedToFront() {
+        guard !launchingGame, !isDeepLinkLaunching else { return }
+        if joinRunning { reload() } else { startJoinRun(); reload(afterClaim: true) }
+        refreshDataOffers()
+    }
+
+    /// Joins the files the Mac launcher sent in parts, at start and each time the app comes back to the front: a copy that ends
+    /// while the app is open (it stays alive for hours on a headset) left the parts unjoined until the app was quit by hand.
+    private func startJoinRun() {
+        // Off the main actor, it lists folders and may write GB: a file the Mac launcher sent in parts is joined first (#899), then
+        // the game files are kept out of the iCloud backup (#618), also what an earlier version put there. A joined file can make a
+        // game playable, so the library is read again.
+        let dataRoot = config.appDataRoot
+        let joinGen = joinGeneration
+        let partSize = config.joinPartSize
+        let progressHook = config.onJoinProgress
+        let reportProgress: @Sendable (DataParts.Progress) -> Void = { [weak self] progress in
+            Task { @MainActor in
+                self?.applyJoinProgress(progress, generation: joinGen)
+            }
+            progressHook?(progress)
+        }
+        let gamesRoot = config.gamesRoot
+        let hotRoot = config.hotFrameworksRoot
+        joinRunning = true
+        startupJoinTask = Task { [weak self] in
+            let joined = await Task.detached(priority: .utility) { () -> Bool in
+                let documents = dataRoot.deletingLastPathComponent()
+                DataParts.writeFeatures(documents: documents)
+                let joined = DataParts.joinAll(appDataRoot: dataRoot, partSize: partSize, onProgress: reportProgress)
+                let allEntries = GameCatalogue.scan(root: gamesRoot, hotRoot: hotRoot, gameDataRoot: dataRoot)
+                let claimed = LooseRomfsClaimer.claimAll(documents: documents, appDataRoot: dataRoot, entries: allEntries)
+                BackupExclusion.apply(appDataRoot: dataRoot)
+                return !joined.isEmpty || !claimed.isEmpty
+            }.value
+            self?.joinRunning = false
+            self?.finishJoinRun(joined: joined, generation: joinGen)
         }
     }
 
@@ -445,7 +474,7 @@ public struct ShellHostConfig: Sendable {
 
     private func lastPlayed(_ id: String) -> Date? { LastPlayedStore(defaults: config.defaults(id)).date }
 
-    private func refresh(_ id: String) {
+    func refresh(_ id: String) {
         guard let e = entries.firstIndex(where: { $0.id == id }), let d = details.firstIndex(where: { $0.id == id }) else { return }
         details[d] = detail(for: entries[e])
     }
@@ -616,6 +645,8 @@ public struct ShellHostConfig: Sendable {
             let doneSize = Self.formatByteSize(clampedDone)
             let totalSize = Self.formatByteSize(progress.totalBytes)
             state = .joiningGameData(percent: percent, doneSize: doneSize, totalSize: totalSize)
+        } else if Self.isMissingOrNeedsUpdate(state), let downloading = downloadState(for: entry.id) {
+            state = downloading
         }
         let played = lastPlayed(entry.id)
         let tile = GameTile(id: entry.id, title: entry.title, subtitle: entry.manifest.map { ShellFormat.version($0.displayVersion) } ?? "",
@@ -722,7 +753,7 @@ public struct ShellHostConfig: Sendable {
 
     /// The closures for `LibraryView`.
     public var actions: ShellActions {
-        ShellActions(
+        var actions = ShellActions(
             onPlay: { [weak self] id in self?.play(id) },
             onChange: { [weak self] id, setting, value in self?.change(id, setting: setting, value: value) },
             onPickGameData: { [weak self] id in self?.pickGameData(id) },
@@ -754,6 +785,8 @@ public struct ShellHostConfig: Sendable {
                 guard let self else { return false }
                 return await self.saveIconAndOpenShortcuts(for: id)
             })
+        actions.onDownloadGameData = { [weak self] id in self?.downloadGameData(id) }
+        return actions
     }
 
     public func change(_ id: String, setting: String, value: String) {
@@ -1397,7 +1430,7 @@ public struct ShellHostConfig: Sendable {
         }
     }
 
-    private static func formatByteSize(_ bytes: Int64) -> String {
+    static func formatByteSize(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         formatter.allowsNonnumericFormatting = false

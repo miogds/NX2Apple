@@ -125,7 +125,7 @@ import NXLauncher
         let message = build.doneNote
         defer { build.doneNote = message }
         build.doneNote = message.replacingOccurrences(of: errorFolder.path, with: "/Volumes/Games")
-        try writeCapture(ActionCard(build: build, dependencies: stores.dependencies, repo: stores.repo), stores: stores, to: directory, file: "mac-placement-error.png")
+        try writeCapture(ActionCard(build: build, dependencies: stores.dependencies, repo: stores.repo, devices: stores.deviceStore), stores: stores, to: directory, file: "mac-placement-error.png")
     }
 
     private func writeCapture<V: View>(_ card: V, stores: LauncherStores, to directory: String, file: String) throws {

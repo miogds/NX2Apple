@@ -18,6 +18,7 @@ extension LibraryView {
         a.onPlay = { if !echo() { o.onPlay($0) } }
         a.onChange = { if !echo() { o.onChange($0, $1, $2) } }
         a.onPickGameData = { if !echo() { o.onPickGameData($0) } }
+        a.onDownloadGameData = { if !echo() { o.onDownloadGameData($0) } }
         a.onUseAppData = { if !echo() { o.onUseAppData($0) } }
         a.onPickCloudSaves = { if !echo() { o.onPickCloudSaves($0) } }
         a.onDisableCloudSaves = { if !echo() { o.onDisableCloudSaves($0) } }
@@ -69,6 +70,7 @@ extension LibraryView {
         case .playable: targetActions.onPlay(detail.id)
         case .needsGameData, .needsDataUpdate: targetActions.onPickGameData(detail.id)
         case .joiningGameData: break
+        case .downloadAvailable, .downloadingGameData: targetActions.onDownloadGameData(detail.id)
         case .needsAppUpdate: targetActions.onAppUpdate()
         case .broken: targetActions.onShowLog(detail.id)
         }

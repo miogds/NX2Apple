@@ -334,6 +334,8 @@ package struct ShellInstaller {
     /// Enabled by default; set `NX_DISABLE_HOT_INSTALL=1` to force full `xcodebuild` reinstalls.
     package var allowHotInstall = ProcessInfo.processInfo.environment["NX_DISABLE_HOT_INSTALL"] != "1"
     package var now: () -> Date = { Date() }
+    /// Set: the device downloads the game data from this Mac itself, and the install does not copy it (`offerDownload`).
+    package var dataSource: DataSourceOffer? = nil
 
     package init(xcrun: String = "/usr/bin/xcrun", repo: String, python: String, root: String, device: String, team: String) {
         self.xcrun = xcrun; self.repo = repo; self.python = python; self.root = root; self.device = device; self.team = team
@@ -420,6 +422,7 @@ package struct ShellInstaller {
             if !signed.notes.isEmpty { res.message = ([res.message] + signed.notes).joined(separator: "\n") }
             return res
         }
+        if let dataSource, let offered = offerDownload(dataSource, signed: signed) { return offered }
         // 7: the game data, only what the device does not have yet
         var result = copyGameData(titleID: titleID, archive: archive, app: signed.outcome.appPath,
                                   bundleID: signed.outcome.bundleID, outcome: signed.outcome, appJoinsParts: true)
@@ -429,10 +432,10 @@ package struct ShellInstaller {
 
     /// Steps 3 to 6: prepare the shared app's library and project, sign it, and install the app bundle on the device.
     func signAndInstallApp(framework: String, titleID: String, name: String) -> (outcome: Outcome, notes: [String]) {
-        guard FileManager.default.fileExists(atPath: framework) else {
+        guard framework.isEmpty || FileManager.default.fileExists(atPath: framework) else {   // empty: the app alone (`installLauncher`)
             return (missingFramework(framework, name: name), [])
         }
-        if let hot = tryHotInstall(games: [HotGame(framework: framework, titleID: titleID, name: name, pickedArtwork: pickedArtwork)]) {
+        if !framework.isEmpty, let hot = tryHotInstall(games: [HotGame(framework: framework, titleID: titleID, name: name, pickedArtwork: pickedArtwork)]) {
             return hot
         }
         // A device this Mac never paired is found out now, not after the signing: nothing is built for it

@@ -121,7 +121,7 @@ extension BuildStore {
         runningTarget = self.target
 
         let isMac = self.target == BuildTarget.mac
-        if !isMac, !shellDeviceChecked, !exportsShell {
+        if !isMac, !shellDeviceChecked, !exportsShell, !buildsForShelf {
             guard installsDirectly else {
                 doneNote = t("shell.needsDevice")
                 done = false

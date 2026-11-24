@@ -49,6 +49,14 @@ final class DevicePlatformTests: XCTestCase {
         XCTAssertEqual(ShellInstall.paths(ofApp: ShellInstall.appPath(root: root))?.root, root)
     }
 
+    func testAFrameworkNamesItsPlatformAndItsShaderFolder() {
+        XCTAssertEqual(DevicePlatform(framework: "/w/shell-framework-xros/DmGame0100.framework"), .visionos)
+        XCTAssertEqual(DevicePlatform(framework: "/w/shell-framework/DmGame0100.framework"), .ios)
+        XCTAssertEqual(DevicePlatform(framework: nil), .ios)
+        XCTAssertEqual(DevicePlatform.visionos.shaderFolder, "xros")
+        XCTAssertEqual(DevicePlatform.ios.shaderFolder, "ios")
+    }
+
     func testTheStepsAfterABuildTakeTheNewestFrameworkOfEitherPlatform() throws {
         let fm = FileManager.default
         let work = fm.temporaryDirectory.appendingPathComponent("nx-platform-\(UUID().uuidString)").path
@@ -60,5 +68,14 @@ final class DevicePlatformTests: XCTestCase {
         XCTAssertEqual(ShellInstall.builtFramework(workDir: work), vision)
         XCTAssertEqual(ShellInstall.builtFramework(workDir: work, platform: .ios), ios)
         XCTAssertEqual(ShellInstall.builtFramework(workDir: work, platform: .visionos), vision)
+    }
+}
+
+/// The app alone, with no game in it: the script is told so, and a game is added to the project only when one is named.
+final class EmptyLauncherTests: XCTestCase {
+    func testTheBuildScriptAcceptsNoGameOnlyWhenToldSo() throws {
+        let script = try String(contentsOfFile: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path + "/frontend-ios/Shell/build_shell.sh", encoding: .utf8)
+        XCTAssertTrue(script.contains(#"[ -n "${DM_SHELL_FRAMEWORKS:-}" ] || [ -n "${DM_SHELL_EMPTY:-}" ] || die"#))
+        XCTAssertTrue(script.contains("if not paths and not os.environ.get('DM_SHELL_EMPTY'): sys.exit('[RED] no framework named')"))
     }
 }

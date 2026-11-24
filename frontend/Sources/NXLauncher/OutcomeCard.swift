@@ -34,43 +34,46 @@ package struct OutcomeCard: View {
         }
         if build.done && build.runningTarget != BuildTarget.mac && !build.installedOn.isEmpty {
             CardGroup(String(format: loc.t("dev.installed"), devices.deviceName(build.installedOn))) {
-                CardRow(loc.t("dev.installedNote"), dot: LauncherPalette.ready) {
+                // The launcher alone on a headset: no game, no game data, and the first-time help is in the page's settings section
+                CardRow(loc.t(build.launcherOperation ? "shell.launcherReady" : "dev.installedNote"), dot: LauncherPalette.ready) {
                     Button(String(format: loc.t("dev.open"), devices.deviceName(build.installedOn))) {
                         build.openOnDevice(udid: build.installedOn, app: build.installedAppPath) { error in
                             if let error { build.doneNote = error }
                         }
                     }
                 }
-                if !build.archivePath.isEmpty {
+                if !build.archivePath.isEmpty, !build.launcherOperation {
                     CardDivider()
                     CardRow(loc.t("dev.gameData"), detail: build.shortPath(build.archivePath), dot: LauncherPalette.ready, help: build.archivePath) {
                         Button(loc.t("install.reveal")) { revealInFinder(build.archivePath) }
                     }
                 }
-                CardDivider()
-                CardDisclosure(
-                    loc.t("dev.firstInstallGuide.title"),
-                    detail: loc.t("dev.firstInstallGuide.subtitle"),
-                    isOpen: trustGuideOpen
-                ) {
-                    withAnimation(.easeInOut(duration: 0.18)) { trustGuideOpen.toggle() }
-                }
-                if trustGuideOpen {
-                    VStack(alignment: .leading, spacing: 10) {
-                        guideStep(
-                            index: "1",
-                            title: loc.t("dev.firstInstallGuide.devModeTitle"),
-                            bodyText: loc.t("dev.firstInstallGuide.devModeBody")
-                        )
-                        guideStep(
-                            index: "2",
-                            title: loc.t("dev.firstInstallGuide.trustTitle"),
-                            bodyText: loc.t("dev.firstInstallGuide.trustBody")
-                        )
+                if !build.launcherOperation {
+                    CardDivider()
+                    CardDisclosure(
+                        loc.t("dev.firstInstallGuide.title"),
+                        detail: loc.t("dev.firstInstallGuide.subtitle"),
+                        isOpen: trustGuideOpen
+                    ) {
+                        withAnimation(.easeInOut(duration: 0.18)) { trustGuideOpen.toggle() }
                     }
-                    .padding(.horizontal, 18)
-                    .padding(.top, 2)
-                    .padding(.bottom, 14)
+                    if trustGuideOpen {
+                        VStack(alignment: .leading, spacing: 10) {
+                            guideStep(
+                                index: "1",
+                                title: loc.t("dev.firstInstallGuide.devModeTitle"),
+                                bodyText: loc.t("dev.firstInstallGuide.devModeBody")
+                            )
+                            guideStep(
+                                index: "2",
+                                title: loc.t("dev.firstInstallGuide.trustTitle"),
+                                bodyText: loc.t("dev.firstInstallGuide.trustBody")
+                            )
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.top, 2)
+                        .padding(.bottom, 14)
+                    }
                 }
             }
         }

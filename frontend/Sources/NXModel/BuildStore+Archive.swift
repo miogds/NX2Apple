@@ -561,7 +561,7 @@ extension BuildStore {
         let expectedChain = (manifestChain?.isEmpty == false) ? manifestChain
             : EngineLayout.shaderChain(repo: repoPath).map { "b-" + $0 }
 
-        let shaderIOS = workDir + "/shader/ios"
+        let shaderIOS = workDir + "/shader/" + DevicePlatform(framework: builtFW).shaderFolder   // a visionOS build's libraries are in shader/xros
         var isDir: ObjCBool = false
         if fm.fileExists(atPath: shaderIOS, isDirectory: &isDir), isDir.boolValue,
            let entries = try? fm.contentsOfDirectory(atPath: shaderIOS) {

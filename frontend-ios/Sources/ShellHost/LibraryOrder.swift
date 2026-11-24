@@ -19,7 +19,8 @@ public enum LibraryOrder {
         if lastPlayed != nil { return 0 }
         switch game.state {
         case .playable: return 1
-        case .joiningGameData: return 2
+        case .joiningGameData, .downloadingGameData: return 2
+        case .downloadAvailable: return 3
         case .needsGameData, .needsDataUpdate: return 3
         case .needsAppUpdate: return 4
         case .broken: return 5

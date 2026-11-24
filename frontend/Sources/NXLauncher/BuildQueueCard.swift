@@ -10,14 +10,20 @@ package struct BuildQueueCard: View {
     @EnvironmentObject var loc: Localizer
     @State private var confirmingCancel = false
 
-    package init(queue: BuildQueueStore, onSelectGames: @escaping () -> Void) {
+    /// Another name for the section and a line under it: the Build page of an Apple Vision Pro calls it Games.
+    var title: String? = nil
+    var footnote = ""
+
+    package init(queue: BuildQueueStore, title: String? = nil, footnote: String = "", onSelectGames: @escaping () -> Void) {
         self.queue = queue
+        self.title = title
+        self.footnote = footnote
         self.onSelectGames = onSelectGames
     }
 
     package var body: some View {
-        CardGroup(queue.queued.isEmpty ? loc.t("queue.title") : loc.t("queue.title") + " · " + String(format: loc.t("queue.count"), queue.queued.count),
-                  trailing: queue.paused ? loc.t("queue.paused") : "") {
+        CardGroup(queue.queued.isEmpty ? title ?? loc.t("queue.title") : (title ?? loc.t("queue.title")) + " · " + String(format: loc.t("queue.count"), queue.queued.count),
+                  footnote: footnote, trailing: queue.paused ? loc.t("queue.paused") : "") {
             if queue.awaitingResume {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(loc.t("queue.resumeTitle")).font(.manrope(14, .medium))

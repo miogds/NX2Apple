@@ -366,6 +366,11 @@ func hop(_ body: @escaping @MainActor () -> Void) {
     package let devices: InstallTarget
     package let volumesRoot: String
     let defaults: UserDefaults
+    /// The operation that runs or ran last is the install of the launcher alone, not a game: the Build page shows its progress
+    /// under the launcher's section.
+    @Published package var launcherOperation = false
+    /// The game data this Mac serves to a device that downloads it itself (a Vision Pro).
+    package private(set) lazy var dataOffers = DataOffers(defaults: defaults)
 
     var proc: RunningProcess?
     var staging: String?
@@ -421,6 +426,8 @@ func hop(_ body: @escaping @MainActor () -> Void) {
         } else {
             buildUpstream = .nxnative
         }
+        // A device was told this Mac's address (the token exists then): it is served again as soon as the launcher is open
+        if defaults.string(forKey: DataOffers.tokenKey)?.isEmpty == false { syncShelf(); dataOffers.start() }
     }
 
     /// The language and the text this store writes itself: views take strings from the environment.

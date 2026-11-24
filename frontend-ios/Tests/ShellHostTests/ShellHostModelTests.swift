@@ -788,8 +788,8 @@ final class Clock: @unchecked Sendable { var date: Date; init(_ d: Date) { date 
         let rank = model.details.map { d -> Int in
             switch d.game.state {
             case .playable: return 1
-            case .joiningGameData: return 2
-            case .needsGameData, .needsDataUpdate: return 3
+            case .joiningGameData, .downloadingGameData: return 2
+            case .needsGameData, .needsDataUpdate, .downloadAvailable: return 3
             case .needsAppUpdate: return 4
             case .broken: return 5
             }

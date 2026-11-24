@@ -37,6 +37,10 @@ extension BuildStore {
     /// The platform the shared app is built for: the target card's (iPhone / iPad, or Apple Vision Pro). The IPA export is the iPhone's.
     package var devicePlatform: DevicePlatform { !exportsShell && visionTarget ? .visionos : .ios }
 
+    /// A build for an Apple Vision Pro ends on this Mac's shelf, with no device: the app on the headset downloads the game's
+    /// code and data itself. The app is installed apart, once (`installLauncher`).
+    package var buildsForShelf: Bool { target != BuildTarget.mac && devicePlatform == .visionos }
+
     /// Why the shell folder cannot be written (`nil`: it can), before an hour of building rather than at the last step.
     package func shellRootProblem() -> String? {
         let root = shellRoot

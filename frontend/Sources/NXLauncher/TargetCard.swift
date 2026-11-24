@@ -19,6 +19,7 @@ package struct TargetCard: View {
                 // The same shared app built for visionOS, with a library of its own on the headset
                 targetCard(BuildTarget.ios, vision: true, symbol: "visionpro", title: "build.vision", note: "build.visionNote")
             }
+            .fixedSize(horizontal: false, vertical: true)
             // A Switch 2 game (#445): how far the engine's support goes, for the chosen target. Nothing is blocked: the engine
             // builds both, and one Switch 2 game ran on an iPhone, but no target is tested for every game.
             if build.isSwitch2Game {
@@ -74,7 +75,7 @@ package struct TargetCard: View {
                     Text(loc.t(displayNote)).font(.manrope(12.5)).foregroundStyle(LauncherPalette.secondaryText).fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .padding(20).frame(maxWidth: .infinity, alignment: .leading)
+            .padding(20).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(selected ? LauncherPalette.selectedFill : LauncherPalette.selectableFill, in: RoundedRectangle(cornerRadius: 14))
             .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(selected ? LauncherPalette.selectedBorder : LauncherPalette.selectableBorder, lineWidth: selected ? 1.5 : 1))
             .contentShape(RoundedRectangle(cornerRadius: 14))

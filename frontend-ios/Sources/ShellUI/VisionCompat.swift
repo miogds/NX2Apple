@@ -6,6 +6,17 @@
 import SwiftUI
 
 extension View {
+    /// A game card as a button. On visionOS a plain button is lit by the system as a soft round spot that follows the
+    /// eyes, which on a wide cover looks like a circle and never reaches the corners. The card gets a style of its own
+    /// there (`VisionCardButtonStyle`): the whole rounded card lights evenly. Elsewhere it is the plain button.
+    @ViewBuilder func cardButtonStyle(cornerRadius: CGFloat) -> some View {
+        #if os(visionOS)
+        self.buttonStyle(VisionCardButtonStyle(cornerRadius: cornerRadius))
+        #else
+        self.buttonStyle(.plain)
+        #endif
+    }
+
     /// On visionOS, drops the shell's cream tint from a control that draws a white label on its own fill. No change elsewhere.
     @ViewBuilder func neutralTintOnVision() -> some View {
         #if os(visionOS)
@@ -17,6 +28,27 @@ extension View {
 }
 
 #if os(visionOS)
+
+/// A card that lights as a whole under the eyes: an even veil and a rim in the card's own rounded shape, and a slight
+/// growth. A button style of the app's own gets no highlight from the system, so the round spot is gone. The veil and
+/// the growth are one group: looking anywhere on the card starts both.
+struct VisionCardButtonStyle: ButtonStyle {
+    let cornerRadius: CGFloat
+    func makeBody(configuration: Configuration) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        configuration.label
+            .overlay {
+                shape.fill(.white.opacity(0.10))
+                    .overlay(shape.strokeBorder(.white.opacity(0.75), lineWidth: 2))
+                    .hoverEffect { effect, isActive, _ in effect.opacity(isActive ? 1 : 0) }
+            }
+            .contentShape(.hoverEffect, shape)
+            .contentShape(shape)
+            .hoverEffect { effect, isActive, _ in effect.scaleEffect(isActive ? 1.02 : 1) }
+            .hoverEffectGroup()
+            .opacity(configuration.isPressed ? 0.85 : 1)
+    }
+}
 
 /// The plain glass button: visionOS's bordered button, without the shell's cream tint. A bordered button there fills
 /// with its tint and draws a white label, so the cream that is an accent on iOS hid the icon.

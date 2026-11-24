@@ -13,6 +13,8 @@ extension BuildStore {
         var installer = ShellInstaller(xcrun: devices.xcrun, repo: repo.path, python: python, root: shellRoot, device: devices.installDevice, team: devices.signingTeam)
         installer.deviceName = devices.deviceName(devices.installDevice)
         installer.defaults = defaults
+        // A Vision Pro downloads the game data itself: the copy through devicectl is slow over Wi-Fi and cannot be paused there
+        if devicePlatform == .visionos { installer.dataSource = dataOffers.offer() }
         installer.lang = localizer.lang
         installer.ownGroup = true
         installer.toolPath = BuildCommands.toolPath("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin", python: python)
@@ -51,7 +53,8 @@ extension BuildStore {
 
     /// Steps 4 to 7 of the shared app (ShellInstall.swift) for a game whose framework is built and whose archive is packed: the
     /// shell's project, signing, the install over the app that is already there, and the game data the device lacks.
-    package func installShell(framework: String, titleID: String, name: String, archive: String, dataOnly: Bool = false) {
+    /// For an Apple Vision Pro the game goes on this Mac's shelf instead (`buildsForShelf`), and `launcher` installs the app alone.
+    package func installShell(framework: String, titleID: String, name: String, archive: String, dataOnly: Bool = false, launcher: Bool = false) {
         buildingGame = true
         runningTarget = BuildTarget.ios
         beginOperation(dataOnly ? .sendingGameData : .installing, game: name, titleID: titleID, destination: .target)
@@ -61,14 +64,28 @@ extension BuildStore {
         finderShown = false
         if dataOnly { failure = nil; done = false; doneNote = "" }
         shellBatchRetry = nil
-        shellRetry = (framework, titleID, name, archive)
+        shellRetry = launcher ? nil : (framework, titleID, name, archive)
+        let shelf = buildsForShelf && !dataOnly && !launcher, offers = dataOffers, root = shellRoot
         let installer = makeInstaller()
         let target = devices
         let device = devices.installDevice
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = dataOnly ? installer.installData(titleID: titleID, archive: archive)
+            let result: ShellInstaller.Outcome
+            if shelf {
+                // The game's signed code and its data are served to the app on the headset, which downloads what it lacks
+                let shelved = installer.shelveGame(framework: framework, titleID: titleID, name: name)
+                if shelved.outcome.ok {
+                    offers.register(titleID: titleID, name: name, archive: archive, shellRoot: root, code: shelved.code)
+                    offers.start()
+                }
+                result = shelved.outcome
+            } else if launcher {
+                result = installer.installLauncher()
+            } else {
+                result = dataOnly ? installer.installData(titleID: titleID, archive: archive)
                                   : installer.install(framework: framework, titleID: titleID, name: name, archive: archive)
-            if !dataOnly, result.ok {
+            }
+            if !dataOnly, !launcher, result.ok {
                 PostBuildCleanup.cleanBuiltFrameworkContainer(framework)
             }
             hop {
@@ -89,11 +106,48 @@ extension BuildStore {
                     } else if let step = result.step { self.noteInstallFailure(step, error: result.message) }
                     return
                 }
-                self.installedOn = device
-                self.installedAppPath = result.appPath
+                if !shelf {
+                    self.installedOn = device
+                    self.installedAppPath = result.appPath
+                }
                 self.finishInstall(nil, note: result.message)
             }
         }
+    }
+
+    /// The shared app alone onto the chosen Apple Vision Pro (`ShellInstaller.installLauncher`): once, then the headset gets
+    /// its games from this Mac's shelf.
+    package var canInstallLauncher: Bool {
+        !running && devicePlatform == .visionos && !devices.installDevice.isEmpty && !devices.signingTeam.isEmpty
+    }
+
+    /// Every game the Vision Pro's app knows goes on this Mac's shelf with its packed data, so the app on the headset can
+    /// download the data of a game it already holds (one built before the shelf existed, one whose data was deleted there): the
+    /// games of the visionOS shell's library and those a build shelved, each with the data folder found under "Save to". A game's
+    /// signed code is offered too when a build put it on the shelf. Read from the disk, so it needs no page and no library scan:
+    /// called when the launcher opens, when the Vision Pro's sections appear and before an install.
+    package func syncShelf() {
+        let root = DevicePlatform.visionos.root(ShellLibrary.resolveRoot(defaults: defaults, parent: shellRootParent, home: home))
+        let fm = FileManager.default
+        var names: [String: String] = [:]
+        for game in ShellLibrary.load(root: root).games { names[game.titleID.uppercased()] = game.name }
+        for folder in (try? fm.contentsOfDirectory(atPath: root + "/shelf")) ?? [] where !folder.hasPrefix(".") && names[folder.uppercased()] == nil {
+            names[folder.uppercased()] = folder
+        }
+        let gamesRoot = outDir + "/games"
+        for (titleID, name) in names {
+            guard let archive = RomFSArchive.archiveDirectories(forTitleID: titleID, gamesRoot: gamesRoot, fm: fm).first else { continue }
+            let code = ShellInstall.shelf(root: root, titleID: titleID) + "/DmGame" + titleID + ".framework"
+            dataOffers.register(titleID: titleID, name: name, archive: archive, shellRoot: root, code: fm.fileExists(atPath: code) ? code : "")
+        }
+    }
+
+    package func installLauncher() {
+        guard canInstallLauncher else { return }
+        syncShelf()
+        failure = nil; done = false; doneNote = ""; stages = []
+        installShell(framework: "", titleID: "", name: "NX2Apple", archive: "", launcher: true)
+        launcherOperation = true
     }
 
     /// Signs and installs the shared app from the frameworks already built, without rebuilding any game or copying `romfs.img` data.

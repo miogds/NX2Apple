@@ -20,7 +20,8 @@ package struct InstallCard: View {
     }
 
     package var body: some View {
-        if build.target != BuildTarget.mac, !build.running || sending || showLocked {
+        // An Apple Vision Pro has its own two steps instead (VisionLauncherCard): nothing is installed or copied with a build
+        if build.target != BuildTarget.mac, !build.visionTarget, !build.running || sending || showLocked {
             card.disabled(build.running && !sending)
                 .onChange(of: build.visionTarget) { _ in dropDeviceOfOtherPlatform() }
                 .onAppear { dropDeviceOfOtherPlatform() }

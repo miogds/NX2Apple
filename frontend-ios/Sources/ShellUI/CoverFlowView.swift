@@ -200,7 +200,7 @@ struct CoverFlowView: View, Equatable {
                 .frame(width: cover, height: cover * 9 / 16)
                 .shadow(color: .black.opacity(0.5), radius: cover * 0.05, y: cover * 0.03)
         }
-        .buttonStyle(.plain)
+        .cardButtonStyle(cornerRadius: cover * 0.03)
         .contextMenu {
             Group {
                 Button(ShellStrings.text("Play"), systemImage: "play.fill") { primary(detail) }

@@ -36,7 +36,13 @@ extension BuildStore {
             return
         }
         // The shared app needs a device this Mac knows. Found out here, before an hour of building, not after it.
-        if target != BuildTarget.mac, !isS2ArmSelected, !shellDeviceChecked, !exportsShell {
+        if buildsForShelf, !isS2ArmSelected, devices.signingTeam.isEmpty {   // the shelf signs the game's code: a team, no device
+            fastRefreshExternalImgPath = nil
+            doneNote = t("shell.needsTeam")
+            done = false
+            return
+        }
+        if target != BuildTarget.mac, !isS2ArmSelected, !shellDeviceChecked, !exportsShell, !buildsForShelf {
             guard installsDirectly else {
                 fastRefreshExternalImgPath = nil
                 doneNote = t("shell.needsDevice")

@@ -27,6 +27,14 @@ package enum DevicePlatform: String, Equatable {
     package var frameworkFolder: String { self == .visionos ? "shell-framework-xros" : "shell-framework" }
     package static let frameworkFolders = [DevicePlatform.ios.frameworkFolder, DevicePlatform.visionos.frameworkFolder]
 
+    /// The platform a built framework is for, from the folder it lies in (`frameworkFolder`). nil path: the iPhone's.
+    package init(framework: String?) {
+        self = framework.map { (($0 as NSString).deletingLastPathComponent as NSString).lastPathComponent } == DevicePlatform.visionos.frameworkFolder ? .visionos : .ios
+    }
+
+    /// The folder of the device's shader libraries in a game's build folder (`shader/ios`, `shader/xros`: the script's IOS_LIBS).
+    package var shaderFolder: String { self == .visionos ? "xros" : "ios" }
+
     // ---- the shell folder ----
 
     /// A framework runs on the platform it was built for only, so the visionOS shared app has a shell folder of its own (its
