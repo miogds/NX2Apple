@@ -147,7 +147,7 @@ package enum PostBuildCleanup {
             }
         }
         if removeShellFramework {
-            try? fm.removeItem(atPath: workDir + "/shell-framework")
+            for folder in DevicePlatform.frameworkFolders { try? fm.removeItem(atPath: workDir + "/" + folder) }
         }
     }
 
@@ -156,7 +156,7 @@ package enum PostBuildCleanup {
     package nonisolated static func cleanBuiltFrameworkContainer(_ frameworkPath: String) {
         guard !frameworkPath.isEmpty else { return }
         let container = URL(fileURLWithPath: frameworkPath).deletingLastPathComponent()
-        guard container.lastPathComponent == "shell-framework" else { return }
+        guard DevicePlatform.frameworkFolders.contains(container.lastPathComponent) else { return }
         try? FileManager.default.removeItem(at: container)
     }
 

@@ -125,7 +125,7 @@ extension ShellInstaller {
         }
         var library = ShellLibrary.load(root: root)
         if !team.isEmpty { library.team = team }   // the export has no team: keep the one an install stored
-        library.add(.init(titleID: titleID, name: name, framework: framework))
+        if !framework.isEmpty { library.add(.init(titleID: titleID, name: name, framework: framework)) }   // empty: the app as the library is
         replaced = mirrorFrameworks(&library)
         library.dropMissing()
         let checked = leaveOutIncomplete(&library, titleID: titleID, name: name)   // ShellFrameworks.swift
@@ -160,6 +160,7 @@ extension ShellInstaller {
                                                   team: team, python: python, path: toolPath, home: NSHomeDirectory(), user: NSUserName(),
                                                   tmp: NSTemporaryDirectory(), package: package, engine: engineRoot)
         env.merge(BundledTools.environment(for: python)) { $1 }
+        if library.games.isEmpty { env["DM_SHELL_EMPTY"] = "1" }   // an app that gets every game from this Mac's server
         let projectName = t("shell.projectStage")
         begin(Self.projectStageID, projectName)
         let project = run(ShellInstall.projectCommand(package: package), env: env, label: projectName, step: { _ in nil })

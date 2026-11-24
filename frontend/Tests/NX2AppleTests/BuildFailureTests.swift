@@ -355,7 +355,7 @@ import NXModel
             try capture("pso-low-\(lang.code)", width: 760, height: 360, ZStack(alignment: .top) {
                 LauncherPalette.background
                 VStack(alignment: .leading, spacing: 20) {
-                    ActionCard(build: build, dependencies: stores.dependencies, repo: stores.repo)
+                    ActionCard(build: build, dependencies: stores.dependencies, repo: stores.repo, devices: stores.deviceStore)
                     BuildFailureCard(m: build)
                 }.environmentObject(stores.localizer).padding(24)
             })
@@ -409,7 +409,7 @@ import NXModel
             try capture("mac-9120-\(lang.code)", width: 780, height: 420, ZStack(alignment: .top) {
                 LauncherPalette.background
                 VStack(alignment: .leading, spacing: 20) {
-                    ActionCard(build: build, dependencies: stores.dependencies, repo: stores.repo)
+                    ActionCard(build: build, dependencies: stores.dependencies, repo: stores.repo, devices: stores.deviceStore)
                     BuildFailureCard(m: build)
                 }.environmentObject(stores.localizer).padding(24)
             })

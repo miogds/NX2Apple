@@ -8,12 +8,16 @@ package struct ActionCard: View {
     @ObservedObject var build: BuildStore
     @ObservedObject var dependencies: DependencyStore
     @ObservedObject var repo: RepoStore
+    /// The device and the team decide whether a queued device build may start, and the build store does not publish their changes:
+    /// without this the button stayed off, with "needs a device", after both were chosen.
+    @ObservedObject var devices: DeviceStore
     @EnvironmentObject var loc: Localizer
 
-    package init(build: BuildStore, dependencies: DependencyStore, repo: RepoStore) {
+    package init(build: BuildStore, dependencies: DependencyStore, repo: RepoStore, devices: DeviceStore) {
         self.build = build
         self.dependencies = dependencies
         self.repo = repo
+        self.devices = devices
     }
 
     private var buildDisabled: Bool {
@@ -60,7 +64,7 @@ package struct ActionCard: View {
             Text(loc.t("status.chooseRepo")).font(.manrope(13)).foregroundStyle(LauncherPalette.building)
         } else if build.hasQueuedBuilds {
             if build.queueNeedsDevice {
-                Text(loc.t("shell.needsDevice")).font(.manrope(13)).foregroundStyle(LauncherPalette.building).lineLimit(3)
+                Text(loc.t(build.buildsForShelf ? "shell.needsTeam" : "shell.needsDevice")).font(.manrope(13)).foregroundStyle(LauncherPalette.building).lineLimit(3)
             } else {
                 Text(String(format: loc.t("queue.readyStatus"), build.queuedCount))
                     .font(.manrope(13)).foregroundStyle(LauncherPalette.secondaryText).lineLimit(2)

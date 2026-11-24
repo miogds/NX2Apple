@@ -57,3 +57,13 @@
 0059-gfx-keep-argument-block-and-ub-padded-arena-gpu.patch
 0060-host-games-support-full-screen-and-wide-aspect-r.patch
 0061-build-seed-infer-and-self-heal-gl-and-vulkan-gfx.patch
+0062-ios-compile-the-host-and-the-front-end-for-visio.patch
+0063-ios-the-launcher-s-play-button-compiles-for-visi.patch
+0064-build-dm-sdk-xros-builds-the-ios-app-for-visiono.patch
+0065-build-build-ipa-sh-builds-the-app-the-framework.patch
+0066-shaders-xros-metal-py-runs-the-chain-s-tools-wit.patch
+0067-nsp-script-platform-visionos-builds-a-game-for-a.patch
+0068-nsp-script-a-visionos-build-names-its-shader-sta.patch
+0069-diagnostics-trace-residency-and-shell-teardown-w.patch
+0070-gfx-release-resource-caches-before-resetting-a-s.patch
+0071-gfx-release-program-and-specialization-caches-on.patch

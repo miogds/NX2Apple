@@ -13,6 +13,7 @@ extension BuildStore {
     }
 
     func beginOperation(_ kind: ActiveOperation.Kind, game: String?, titleID: String?, destination place: OperationPlace) {
+        if launcherOperation { launcherOperation = false }   // `installLauncher` sets it again right after
         var destination: ActiveOperation.Destination?
         switch place {
         case .target:
@@ -57,7 +58,7 @@ extension BuildStore {
     }
 
     private var iosInstallsDirectly: Bool {
-        !devices.installDevice.isEmpty && !devices.signingTeam.isEmpty
+        buildsForShelf ? !devices.signingTeam.isEmpty : !devices.installDevice.isEmpty && !devices.signingTeam.isEmpty
     }
 
     private func effectiveQueuedTarget(for entry: QueueEntry) -> String {
@@ -93,7 +94,7 @@ extension BuildStore {
         if hasQueuedBuilds, let queue {
             guard usesExternalUpstreamRepo || repo.isRepo, deps.allPresent else { return }
             if queueNeedsDevice {
-                doneNote = t("shell.needsDevice")
+                doneNote = t(buildsForShelf ? "shell.needsTeam" : "shell.needsDevice")
                 done = false
                 return
             }

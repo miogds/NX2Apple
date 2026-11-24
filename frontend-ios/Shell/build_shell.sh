@@ -9,6 +9,8 @@
 # Environment:
 #   SHELL_DIR            the shell's project folder (required, outside frontend-ios: Gen/, the project, derived data)
 #   DM_SHELL_FRAMEWORKS  the games' framework folders, one per line (required, at least one, <folder>/DmGame<title ID>.framework)
+#   DM_SHELL_EMPTY       1: an app with no game in it is meant (DM_SHELL_FRAMEWORKS may be empty). The app then gets every game from
+#                        the Mac that installed it: the game's signed framework and its data (frontend-ios DataDownloads.swift)
 #   DM_BUNDLE_ID         the shell's bundle ID (default org.nxnative.shell). Keep it for the life of the install: the same ID installed
 #                        over the existing app keeps its Documents (game data, saves) when it is signed again after 7 days
 #   DM_TEAM_ID           the signing team for the prepared project (default 0000000000, a placeholder)
@@ -18,14 +20,18 @@
 #   DM_XCODE_DERIVED_DATA  derived data (default SHELL_DIR/dd), FONT_PY / STD_FONT as for build_ipa.sh
 #   DM_GAMES_DIR         passed through, for a provisional game profile
 #   DM_ENTITLEMENTS      empty: no Increased Memory Limit request in the prepared project (default: requested, as build_ipa.sh does)
+#   DM_SDK               iphoneos (default) or xros: the same shell for visionOS (the project's platform, visionOS 27.1 as the package's
+#                        minimum, device family 7). The games' frameworks must be built for the same SDK (build_ipa.sh DM_SDK)
 set -u
 SHELL_ROOT=$(cd "$(dirname "$0")" && pwd) || exit 1
 DEFAULT_PKG=$(cd "$SHELL_ROOT/.." && pwd) || exit 1
 REPO_ROOT=$(cd "$DEFAULT_PKG/.." && pwd) || exit 1
 t() { echo "[$(date +%T)] $*"; }; die() { t "FAIL: $*"; exit 1; }
 MODE=${1:-}; case "$MODE" in --prepare-xcode|--build) ;; *) die "usage: $0 --prepare-xcode | --build";; esac
+export DM_SDK=${DM_SDK:-iphoneos}
+case "$DM_SDK" in iphoneos) OS_NAME=iOS;; xros) OS_NAME=visionOS;; *) die "DM_SDK=$DM_SDK: iphoneos or xros";; esac
 [ -n "${SHELL_DIR:-}" ] || die "SHELL_DIR is not set: the shell's project folder"
-[ -n "${DM_SHELL_FRAMEWORKS:-}" ] || die "DM_SHELL_FRAMEWORKS is not set: the games' framework folders, one per line"
+[ -n "${DM_SHELL_FRAMEWORKS:-}" ] || [ -n "${DM_SHELL_EMPTY:-}" ] || die "DM_SHELL_FRAMEWORKS is not set: the games' framework folders, one per line"
 mkdir -p "$SHELL_DIR" || die "mkdir $SHELL_DIR"; S=$(cd "$SHELL_DIR" && pwd)
 [ -n "${DM_SHELL_PACKAGE:-}" ] || DM_SHELL_PACKAGE=$DEFAULT_PKG
 export DM_SHELL_PACKAGE
@@ -53,8 +59,8 @@ FWLIST=$S/frameworks.txt
 python3 -I - "$FWLIST" <<'PY' || die "the frameworks in DM_SHELL_FRAMEWORKS (above)"
 import json, os, sys
 out = sys.argv[1]
-paths = [p.strip() for p in os.environ['DM_SHELL_FRAMEWORKS'].splitlines() if p.strip()]
-if not paths: sys.exit('[RED] no framework named')
+paths = [p.strip() for p in os.environ.get('DM_SHELL_FRAMEWORKS', '').splitlines() if p.strip()]
+if not paths and not os.environ.get('DM_SHELL_EMPTY'): sys.exit('[RED] no framework named')
 seen, rows = {}, []
 for p in paths:
     p = os.path.abspath(p)
@@ -70,7 +76,14 @@ with open(out, 'w', encoding='utf-8') as f:
     for tid, p, name in rows: f.write(f'{tid}\t{p}\t{name}\n')
 PY
 export GAME=$(head -1 "$FWLIST" | cut -f1)
-t "shell: $DM_SHELL_NAME ($DM_BUNDLE_ID), games: $(cut -f3 "$FWLIST" | paste -sd, -)"
+# A framework runs on the platform it was built for only, and the shell embeds it without linking it, so one of the other platform would
+# pass the build and fail at Play. Refuse it here, by the platform its executable was linked for (a file without one is not checked)
+while IFS=$'\t' read -r tid path name; do
+  plat=$(xcrun vtool -show-build "$path/$(basename "$path" .framework)" 2> /dev/null | awk '$1 == "platform" { print $2; exit }')
+  case "$DM_SDK:$plat" in iphoneos:IOS|xros:VISIONOS|xros:XROS|*:) ;;
+    *) die "[RED] $name ($tid) was built for $plat, not for $OS_NAME. Build this game again for $OS_NAME.";; esac
+done < "$FWLIST"
+t "shell: $DM_SHELL_NAME ($DM_BUNDLE_ID), games: $([ -s "$FWLIST" ] && cut -f3 "$FWLIST" | paste -sd, - || echo none)"
 
 t "generate Gen/ (shared files, the project)"
 rm -f "$S/Sources" "$S/tools"
@@ -81,6 +94,11 @@ rm -rf Gen && mkdir -p Gen/dm/font || die "mkdir Gen"
 "${FONT_PY:-python3}" "$DM/tools/make_shared_fonts.py" Gen/dm/font "${STD_FONT:-/System/Library/Fonts/Supplemental/Arial Unicode.ttf}" > /dev/null \
   || die "make_shared_fonts.py (pip install fonttools, or FONT_PY=python with fontTools; STD_FONT=a TTF)"
 mkdir -p Gen/Assets.xcassets && printf '{"info":{"author":"xcode","version":1}}\n' > Gen/Assets.xcassets/Contents.json || die "asset catalog"
+# visionOS: Xcode builds an Icon Composer document (AppIcon.icon) for iOS only, so the app had no icon there. Its icon is an image
+# stack of three layers, rendered from the same artwork (tools/vision_icon.swift) and named AppIcon like the iOS one
+if [ "$DM_SDK" = xros ]; then
+  cp -R "$DM_SHELL_PACKAGE/AppIcon.solidimagestack" Gen/Assets.xcassets/ || die "the visionOS icon (frontend-ios/AppIcon.solidimagestack)"
+fi
 # The shell asks for the Increased Memory Limit capability, as the one-game app does; a framework cannot hold entitlements
 printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
   '<plist version="1.0"><dict><key>com.apple.developer.kernel.increased-memory-limit</key><true/></dict></plist>' > Gen/DmShell.entitlements || die "entitlements"
@@ -112,6 +130,13 @@ for line in open(template, encoding='utf-8').read().splitlines():
                 lines.append(f'{pad}CFBundleLocalizations: [' + ', '.join(['en', *_locs]) + ']')
                 continue
     lines.append(line)
+if os.environ.get('DM_SDK') == 'xros':   # the same project for visionOS: its platform, the package's minimum (frontend-ios/Package.swift) and device family 7
+    text = '\n'.join(lines)
+    for old, new in (('    iOS: "26.0"', '    visionOS: "27.1"'), ('    platform: iOS', '    platform: visionOS'),
+                     ('TARGETED_DEVICE_FAMILY: "1,2"', 'TARGETED_DEVICE_FAMILY: "7"')):
+        if text.count(old) != 1: sys.exit(f'[RED] project-shell.yml: expected one {old.strip()!r}')
+        text = text.replace(old, new)
+    lines = [l for l in text.split('\n') if 'AppIcon.icon' not in l]   # the icon is Gen/Assets.xcassets/AppIcon.solidimagestack there
 if not done: sys.exit('[RED] project-shell.yml has no @FRAMEWORKS@ line')
 open(out, 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
 PY
@@ -127,11 +152,11 @@ if [ "$MODE" = --prepare-xcode ]; then
   exit 0
 fi
 
-t "xcodebuild (Release, unsigned, iPhone + iPad)"
-xcodebuild -project DmShell.xcodeproj -scheme DmShell -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$DD" \
+t "xcodebuild (Release, unsigned, $OS_NAME)"
+xcodebuild -project DmShell.xcodeproj -scheme DmShell -configuration Release -destination "generic/platform=$OS_NAME" -derivedDataPath "$DD" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= build > "$S/build.log" 2>&1 \
   || { grep -E 'error:' "$S/build.log" | head -20; die "xcodebuild, log $S/build.log"; }
-APP=$DD/Build/Products/Release-iphoneos/DmShell.app
+APP=$DD/Build/Products/Release-$DM_SDK/DmShell.app
 [ -x "$APP/DmShell" ] || die "no built app at $APP"
 while IFS=$'\t' read -r tid path name; do
   fw=$APP/Frameworks/$(basename "$path"); [ -d "$fw" ] || die "the app does not embed $(basename "$path")"

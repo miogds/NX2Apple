@@ -38,6 +38,8 @@ struct LibraryGame: Codable, Identifiable, Equatable {
     var hasShellFramework = false
     var installedViaShellReceipt = false
     var shellIPAExists = false
+    /// Built for an Apple Vision Pro and kept on this Mac for the headset to download (the shelf of the visionOS shell folder).
+    var onVisionShelf = false
 
     /// An empty path means there is no Mac build. It is not read, because URL(fileURLWithPath:) would make it the current folder.
     private var playableMacBundle: MacGameBundle? {
@@ -98,6 +100,7 @@ extension LibraryGame {
         hasShellFramework = try c.decodeIfPresent(Bool.self, forKey: .hasShellFramework) ?? false
         installedViaShellReceipt = try c.decodeIfPresent(Bool.self, forKey: .installedViaShellReceipt) ?? false
         shellIPAExists = try c.decodeIfPresent(Bool.self, forKey: .shellIPAExists) ?? false
+        onVisionShelf = try c.decodeIfPresent(Bool.self, forKey: .onVisionShelf) ?? false
     }
 }
 

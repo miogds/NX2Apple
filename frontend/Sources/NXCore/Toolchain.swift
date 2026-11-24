@@ -489,6 +489,7 @@ package enum Toolchain {
     /// The commands that fetch Xcode's two downloadable parts; the setup panel and the guided setup run the same ones.
     package static let metalToolchainCmd = ["/usr/bin/xcodebuild", "-downloadComponent", "MetalToolchain"]
     package static let iosPlatformCmd = ["/usr/bin/xcodebuild", "-downloadPlatform", "iOS"]
+    package static let visionPlatformCmd = ["/usr/bin/xcodebuild", "-downloadPlatform", "visionOS"]
 
     /// One admin prompt runs both steps: switch the toolchain to this Xcode, then let it finish its first launch (license and
     /// components) - a fresh App Store download has neither. The Xcode row and the failure card run the same command.

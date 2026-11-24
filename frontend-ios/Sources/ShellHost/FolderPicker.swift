@@ -96,7 +96,9 @@ public struct DocumentFolderPicker: FolderPicker {
         private let answer: FolderPickAnswer<URL>
         init(answer: FolderPickAnswer<URL>) { self.answer = answer }
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) { answer.finish(urls.first) }
+        #if !os(visionOS)   // the single-URL callback is unavailable on visionOS, which only calls the one above
         func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentAt url: URL) { answer.finish(url) }
+        #endif
         func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { answer.finish(nil) }
         func presentationControllerDidDismiss(_ presentationController: UIPresentationController) { answer.finish(nil) }
     }

@@ -367,6 +367,24 @@ private final class JoinGate: @unchecked Sendable {
         #expect(finalDetail.dataNote.isEmpty)
     }
 
+    /// Parts that arrive while the app is open (the Mac's copy takes hours, the app stays alive) are joined when it comes back to the front.
+    @Test func partsThatArriveWhileTheAppIsOpenAreJoinedOnReturnToTheFront() async throws {
+        let box = try Sandbox()
+        let dir = box.appData.appendingPathComponent(Fixtures.orbit, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data("0123".utf8).write(to: dir.appendingPathComponent("romfs.img.nxpart.0000.0002"))
+        var cfg = box.config()
+        cfg.joinPartSize = 4
+        let model = ShellHostModel(config: cfg)
+        await model.waitForStartupTasks()
+        #expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("romfs.img").path))
+
+        try Data("4567".utf8).write(to: dir.appendingPathComponent("romfs.img.nxpart.0001.0002"))
+        model.returnedToFront()
+        await model.waitForStartupTasks()
+        #expect(try Data(contentsOf: dir.appendingPathComponent("romfs.img")) == Data("01234567".utf8))
+    }
+
     @Test func joinGenerationPreventsStaleProgressFromOverwritingDeletedGame() async throws {
         let box = try Sandbox()
         let dir = box.appData.appendingPathComponent(Fixtures.orbit, isDirectory: true)

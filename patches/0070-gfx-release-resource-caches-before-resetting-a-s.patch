@@ -1,0 +1,384 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jorge Trigger <lordchronotrigger@gmail.com>
+Date: Wed, 18 Nov 2026 19:34:29 +0100
+Subject: [PATCH] gfx: release resource caches before resetting a shell session
+
+Function-local strong caches survived graphics teardown. The shell then restores
+raw writable segments without ARC releases, losing their ownership. Expose and
+release the resource caches after queue drain, and reset their cached GPU IDs.
+The real-Metal regression verifies release and residency across two sessions.
+This fixes an ownership defect, not a proven cause of the iPad kernel wait.
+Pipeline and library caches remain outside this change.
+
+Upstream-Status: pending
+Reason: Release retained Metal resources before the personal iPad shell resets the game
+Issue: seedds/nxnative#2098 (related hang only, causality unproven)
+---
+ dm/games/0400486024DEC000/README.md |  1 +
+ dm/gfx/nvn/nvn_mtl.m                | 96 ++++++++++++++++++-----------
+ dm/gfx/tests/Makefile               |  4 ++
+ dm/gfx/tests/t_session_buffers.m    | 84 +++++++++++++++++++++++++
+ docs/reference/memory.md            |  8 +++
+ 5 files changed, 156 insertions(+), 37 deletions(-)
+ create mode 100644 dm/gfx/tests/t_session_buffers.m
+
+diff --git a/dm/games/0400486024DEC000/README.md b/dm/games/0400486024DEC000/README.md
+index a4b6b52..c738a7d 100644
+--- a/dm/games/0400486024DEC000/README.md
++++ b/dm/games/0400486024DEC000/README.md
+@@ -132,6 +132,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25
+ ## Found on this game
+ 
+ - Open: [a residency commit does not return on an iPad](../../../docs/reference/rendering.md#a-residency-commit-does-not-return-on-an-ipad). A device stackshot identifies the replay thread's driver call and the guest main thread waiting behind it. Opt-in residency and teardown checkpoints gather the next failure, without changing rendering or claiming a fix.
++- [Metal resource caches keep ownership after session teardown](../../../docs/reference/memory.md#metal-resource-caches-keep-ownership-after-session-teardown): corrected with a two-session Metal regression on the Mac. The iOS shell's raw data restore loses unreleased cache references. This is a separate ownership defect, with no evidence that it causes the iPad's residency-commit hang, whose device retest remains open.
+ 
+ - [GPU frame captures need pipelines built through the device](../../../docs/reference/shaders.md#gpu-frame-captures-need-pipelines-built-through-the-device): fixed for every game ([PR #2688](https://github.com/seedds/nxnative/pull/2688)). An M1 session with `MTL_CAPTURE_ENABLED=0` left set ran without the Metal 4 pipelines: `hybrid pipelines off`, 467 pipeline stalls of about 170 ms and one 84 s freeze. The host now asks Metal whether the run can capture.
+ - [A scene that does not fit the shorter hold probed against another scene's GPU time](../../../docs/reference/frame-rate.md#a-scene-that-does-not-fit-the-shorter-hold-probed-against-another-scenes-gpu-time): fixed in the frame step for every game. Hyrule Field at night on an M2 Pro (22 failed probes a minute, 159 frames at 20 fps, PR [#2611](https://github.com/seedds/nxnative/pull/2611)) and Kokiri Forest at each turn of the camera on an Android port. On an M4 Pro at render scale 1.333, standing at the Hyrule Field save point: 9 and 13 failed probes a run before, 2 after; the M2 Pro retest is open.
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index 4cedf35..aa3d0c7 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -4337,17 +4337,17 @@ static size_t mtl_pf_bytes(MTLPixelFormat pf) {
+     return 0;
+ }
+ // Shared all-zero buffer (for zeroing new textures and scissored zero clears): replaced by a bigger one when too small; the old one is released after in-flight submissions finish
++static id<MTLBuffer> g_zero_fill; static size_t g_zero_fill_size;
+ static id<MTLBuffer> zero_buf(size_t need) {
+-    static id<MTLBuffer> zb; static size_t zn;
+-    if (need > zn) {
++    if (need > g_zero_fill_size) {
+         size_t n = MAX(need, (size_t)4 << 20);
+         id<MTLBuffer> b = [g_dev newBufferWithLength:n options:MTLResourceStorageModeShared];
+         if (!b) return nil;
+         memset(b.contents, 0, n); res_add(b);
+-        if (zb) defer_obj_release(zb);
+-        zb = b; zn = n;
++        if (g_zero_fill) defer_obj_release(g_zero_fill);
++        g_zero_fill = b; g_zero_fill_size = n;
+     }
+-    return zb;
++    return g_zero_fill;
+ }
+ static uint64_t g_tex_zeroed;
+ static void tex_zero_fill(id<MTLTexture> mt) {
+@@ -7881,6 +7881,8 @@ static unsigned vs_streams(const nvn_refl *rf) {   // the streams the vertex sha
+ }
+ // Returns the first stream the vertex shader reads (rf) whose non-zero address is in no memory pool, or -1. Such a slot would keep the buffer an earlier draw bound
+ // there, so the caller skips the draw, as for an index buffer in no pool; a stream with address 0 reads the zero buffer through the vertex descriptor (ZERO_ATTR)
++static id<MTLBuffer> g_vbuf_zero;
++static uint64_t g_vbuf_zero_gpu;
+ static int bind_vbufs(id<MTL4RenderCommandEncoder> en, const nvn_refl *rf) {
+     static struct { uint64_t addr, gpu, gen; } cache[16];
+     uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_acquire);
+@@ -7901,9 +7903,8 @@ static int bind_vbufs(id<MTL4RenderCommandEncoder> en, const nvn_refl *rf) {
+         }
+         enc_r_vbuf(en, VB_SLOT(s), gpu);
+     }
+-    static id<MTLBuffer> zero; static uint64_t zero_gpu;
+-    if (!zero) { zero = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(zero); zero_gpu = zero.gpuAddress; }
+-    enc_r_vbuf(en, 30, zero_gpu);
++    if (!g_vbuf_zero) { g_vbuf_zero = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(g_vbuf_zero); g_vbuf_zero_gpu = g_vbuf_zero.gpuAddress; }
++    enc_r_vbuf(en, 30, g_vbuf_zero_gpu);
+     return bad;
+ }
+ // The per-draw layout block of a pulling pipeline (dm/gfx/tools/dmsh_pull.metal dm_vlayout, at buffer 16): per stream the base address, stride and divisor, per NVN attribute its
+@@ -11116,11 +11117,11 @@ static void warm_start(void) {
+ // Argument buffer: filled item by item per the B reflection (uniform slot r, separate texture / sampler slot r, storage buffer slot r, driver segments c0 / c2, c1, support_buffer)
+ // Unbound resources read 0: give all-zero dummy resources (NVN descriptors 0..255 are reserved for the driver; the game binding handle 0 means 'this slot is empty')
+ static uint64_t g_dummy_img_rid[8][4], g_dummy_tbuf_rid[4];
++static __strong id<MTLTexture> g_dummy_tex[DMY_NT][4], g_dummy_img[8][4], g_dummy_tbuf[4];
+ static id<MTLTexture> dummy_tex(int dtt, int dpf) {
+-    static __strong id<MTLTexture> cache[DMY_NT][4];
+     MTLTextureType tt = (MTLTextureType)dtt;
+     MTLPixelFormat pf = dpf == NVN_DPF_DEPTH ? MTLPixelFormatDepth32Float : dpf == NVN_DPF_UINT ? MTLPixelFormatRGBA32Uint : dpf == NVN_DPF_SINT ? MTLPixelFormatRGBA32Sint : MTLPixelFormatRGBA8Unorm;
+-    id<MTLTexture> t = cache[dtt % DMY_NT][dpf & 3];
++    id<MTLTexture> t = g_dummy_tex[dtt % DMY_NT][dpf & 3];
+     if (t) return t;
+     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
+     d.textureType = tt; d.pixelFormat = pf; d.width = d.height = d.depth = 1; d.storageMode = MTLStorageModeShared; d.usage = MTLTextureUsageShaderRead;
+@@ -11133,33 +11134,31 @@ static void warm_start(void) {
+         if (dpf == NVN_DPF_DEPTH) { rp.depthAttachment.texture = t; rp.depthAttachment.loadAction = MTLLoadActionClear; rp.depthAttachment.clearDepth = 0; rp.depthAttachment.storeAction = MTLStoreActionStore; }
+         else { rp.colorAttachments[0].texture = t; rp.colorAttachments[0].loadAction = MTLLoadActionClear; rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0); rp.colorAttachments[0].storeAction = MTLStoreActionStore; }
+         id<MTLCommandBuffer> cb = [g_q commandBuffer]; [[cb renderCommandEncoderWithDescriptor:rp] endEncoding]; [cb commit]; [cb waitUntilCompleted];
+-        cache[dtt % DMY_NT][dpf & 3] = t; g_dummy_tex_rid[dtt % DMY_NT][dpf & 3] = t.gpuResourceID._impl; res_add(t);
++        g_dummy_tex[dtt % DMY_NT][dpf & 3] = t; g_dummy_tex_rid[dtt % DMY_NT][dpf & 3] = t.gpuResourceID._impl; res_add(t);
+         return t;
+     }
+     t = [g_dev newTextureWithDescriptor:d];   // Shared storage is all zeros when newly created
+     if (pf != MTLPixelFormatDepth32Float) { uint8_t z[64] = {0}; NSUInteger faces = tt == MTLTextureTypeCube || tt == MTLTextureTypeCubeArray ? 6 : 1;
+         for (NSUInteger f = 0; f < faces; f++) [t replaceRegion:MTLRegionMake3D(0, 0, 0, 1, 1, 1) mipmapLevel:0 slice:f withBytes:z bytesPerRow:16 bytesPerImage:16]; }
+-    cache[dtt % DMY_NT][dpf & 3] = t; g_dummy_tex_rid[dtt % DMY_NT][dpf & 3] = t.gpuResourceID._impl; res_add(t);
++    g_dummy_tex[dtt % DMY_NT][dpf & 3] = t; g_dummy_tex_rid[dtt % DMY_NT][dpf & 3] = t.gpuResourceID._impl; res_add(t);
+     return t;
+ }
+ // Write sink for unbound image slots: kept separate from the dummy textures that read 0 (writes must not pollute them); one is shared per same type and same pixel class
+ static id<MTLTexture> dummy_img(int dtt, int dpf) {
+-    static __strong id<MTLTexture> cache[8][4];
+-    id<MTLTexture> t = cache[dtt & 7][dpf & 3]; if (t) return t;
++    id<MTLTexture> t = g_dummy_img[dtt & 7][dpf & 3]; if (t) return t;
+     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
+     d.textureType = (MTLTextureType)dtt; d.pixelFormat = dpf == NVN_DPF_UINT ? MTLPixelFormatRGBA32Uint : dpf == NVN_DPF_SINT ? MTLPixelFormatRGBA32Sint : MTLPixelFormatRGBA16Float;
+     d.width = d.height = d.depth = 1; d.storageMode = MTLStorageModePrivate; d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+-    t = [g_dev newTextureWithDescriptor:d]; cache[dtt & 7][dpf & 3] = t; g_dummy_img_rid[dtt & 7][dpf & 3] = t.gpuResourceID._impl; res_add(t); return t;
++    t = [g_dev newTextureWithDescriptor:d]; g_dummy_img[dtt & 7][dpf & 3] = t; g_dummy_img_rid[dtt & 7][dpf & 3] = t.gpuResourceID._impl; res_add(t); return t;
+ }
+ static id<MTLBuffer> dummy_buf(void);
+ static id<MTLTexture> dummy_tbuf(int dpf) {   // Unbound typed buffer: all zeros (pixel class matches the shader's texture_buffer<T>)
+-    static __strong id<MTLTexture> cache[4];
+-    id<MTLTexture> t = cache[dpf & 3]; if (t) return t;
++    id<MTLTexture> t = g_dummy_tbuf[dpf & 3]; if (t) return t;
+     MTLPixelFormat pf = dpf == NVN_DPF_UINT ? MTLPixelFormatRGBA32Uint : dpf == NVN_DPF_SINT ? MTLPixelFormatRGBA32Sint : MTLPixelFormatRGBA32Float;
+     id<MTLBuffer> b = dummy_buf();
+     MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:pf width:b.length / 16 resourceOptions:b.resourceOptions usage:MTLTextureUsageShaderRead];
+     t = [b newTextureWithDescriptor:d offset:0 bytesPerRow:b.length];
+-    cache[dpf & 3] = t; g_dummy_tbuf_rid[dpf & 3] = t.gpuResourceID._impl; return t;
++    g_dummy_tbuf[dpf & 3] = t; g_dummy_tbuf_rid[dpf & 3] = t.gpuResourceID._impl; return t;
+ }
+ // A buffer texture's view (tex_mtl, target BUFFER) starts at the aligned boundary below its pool offset, wider by the elements in between: their count, which a shader with an offset table
+ // entry for the binding adds to its coordinates (the translator's TranslationFlags.MetalBufferImageBias), from the texture's own view and its registered width. 0 for any other texture,
+@@ -11208,11 +11207,13 @@ static uint32_t tbuf_lead(int tid, id<MTLTexture> t) {
+     g_tbs_cache[k].src = t; g_tbs_cache[k].copy = c; g_tbs_cache[k].epoch = g_fence + 1; g_tbs_cache[k].rid = *rid = c.gpuResourceID._impl;
+     return c;
+ }
++static id<MTLSamplerState> g_dummy_samp;
++static uint64_t g_dummy_samp_rid;
+ static id<MTLSamplerState> dummy_samp(void) {
+-    static id<MTLSamplerState> s; if (!s) { MTLSamplerDescriptor *d = [MTLSamplerDescriptor new]; d.supportArgumentBuffers = YES; s = [g_dev newSamplerStateWithDescriptor:d]; }
+-    return s;
++    if (!g_dummy_samp) { MTLSamplerDescriptor *d = [MTLSamplerDescriptor new]; d.supportArgumentBuffers = YES; g_dummy_samp = [g_dev newSamplerStateWithDescriptor:d]; }
++    return g_dummy_samp;
+ }
+-static uint64_t dummy_samp_rid(void) { static uint64_t rid; if (!rid) rid = dummy_samp().gpuResourceID._impl; return rid; }
++static uint64_t dummy_samp_rid(void) { if (!g_dummy_samp_rid) g_dummy_samp_rid = dummy_samp().gpuResourceID._impl; return g_dummy_samp_rid; }
+ // The pools a handle traced to no slot reads (nvn_refl.h TEXP / SAMPP, dmsh_reflect.py pool_arrays): Mario Party Superstars' characters take their light textures' handles from a storage
+ // buffer. One buffer per element type and pool base: the bound n (DMSH_POOL_HEAD bytes), then the resource ID of each ID of the pool bound at the draw (base = S.tex_base / S.samp_base,
+ // as ubo_tex_id adds), the dummy where an ID holds nothing or a texture of another type, and the dummy at n for IDs past the table. Patched or rebuilt when a registration or a texture's
+@@ -11751,8 +11752,10 @@ static void tu_pass(void) { @autoreleasepool {
+     g_tu_now = (uint32_t)((ns - t0) / 100000000ull) + 1;
+     if (g_tu_now - g_tu_last >= 10 && sw_on(tu_mode())) tu_pass();
+ }
+-static id<MTLBuffer> dummy_buf(void) { static id<MTLBuffer> b; if (!b) { b = [g_dev newBufferWithLength:64 << 10 options:MTLResourceStorageModeShared]; res_add(b); } return b; }
+-static uint64_t dummy_buf_gpu(void) { static uint64_t gpu; if (!gpu) gpu = dummy_buf().gpuAddress; return gpu; }
++// These session caches are explicit so teardown can release their ownership before the iOS shell restores the image's writable sections.
++static id<MTLBuffer> g_dummy_buf; static uint64_t g_dummy_buf_gpu;
++static id<MTLBuffer> dummy_buf(void) { if (!g_dummy_buf) { g_dummy_buf = [g_dev newBufferWithLength:64 << 10 options:MTLResourceStorageModeShared]; res_add(g_dummy_buf); } return g_dummy_buf; }
++static uint64_t dummy_buf_gpu(void) { if (!g_dummy_buf_gpu) g_dummy_buf_gpu = dummy_buf().gpuAddress; return g_dummy_buf_gpu; }
+ // The texture of an image slot (a view of the shader's class and type when the texture's differ, img_fit), else the write sink. Caller holds g_rmu
+ static id<MTLTexture> img_binding(int tid, const nvn_rbind *b, uint64_t *rid, int *real) {
+     void *tv = NULL; *rid = tid ? tex_fast_rid(tid, &tv) : 0;
+@@ -11820,9 +11823,9 @@ static void image_prepare(NvProg *pr, unsigned stages) {
+ // much as a linear one's pool memory. They used to go through a raw pointer beside the texture, which for a block-linear image (a deswizzled copy) could only be a scratch buffer
+ // nothing read, and a 3D image's did not compile. Metal allows texture atomics only on an R32Uint / R32Sint texture made with the shader-atomic usage (img_usage); any other
+ // texture in an atomic slot is replaced by an atomic-capable write sink, logged red, rather than left to the GPU's undefined behaviour
++static __strong id<MTLTexture> g_atomic_sink[8][3];
+ static id<MTLTexture> dummy_img_atomic(int dtt, int dpf, int wide) {   // wide: a 64-bit atomic's sink (RG32Uint; nvn_rbind atom 2)
+-    static __strong id<MTLTexture> cache[8][3];
+-    int s = wide && dev_atomic64() ? 2 : dpf == NVN_DPF_SINT; id<MTLTexture> t = cache[dtt & 7][s]; if (t) return t;
++    int s = wide && dev_atomic64() ? 2 : dpf == NVN_DPF_SINT; id<MTLTexture> t = g_atomic_sink[dtt & 7][s]; if (t) return t;
+     MTLPixelFormat pf = s == 2 ? MTLPixelFormatRG32Uint : s ? MTLPixelFormatR32Sint : MTLPixelFormatR32Uint;
+     MTLTextureUsage u = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageShaderAtomic;
+     if ((MTLTextureType)dtt == MTLTextureTypeTextureBuffer) {
+@@ -11834,7 +11837,7 @@ static void image_prepare(NvProg *pr, unsigned stages) {
+         d.textureType = (MTLTextureType)dtt; d.pixelFormat = pf; d.width = d.height = d.depth = 1; d.storageMode = MTLStorageModePrivate; d.usage = u;
+         t = [g_dev newTextureWithDescriptor:d];
+     }
+-    cache[dtt & 7][s] = t; res_add(t); return t;
++    g_atomic_sink[dtt & 7][s] = t; res_add(t); return t;
+ }
+ static int img_atomic_ok(id<MTLTexture> t, const nvn_rbind *b) {
+     id<MTLTexture> base = t; while (base.parentTexture) base = base.parentTexture;   // a view of a view: a descriptor of R32 over a texture moved to R32 storage has its colour view as parent (tex_upgrade)
+@@ -11874,14 +11877,15 @@ static void bind_args(id<MTLCommandEncoder> en, int nvn_stage, int metal_vertex,
+ }
+ // Static constant buffers of route B: the Ryujinx support_buffer (layout in Ryujinx.Graphics.Shader/SupportBuffer.cs: alpha_test u32, is_bgra u32[8],
+ // viewport_inverse f4, viewport_size f4, frag_scale_count i32, render_scale f32[73]..., each field aligned to 16 bytes) and the all-0 driver constant segment (64 KB = the upper bound declared by shaders)
++static id<MTLBuffer> g_support_buf; static uint64_t g_support_gpu;
+ static id<MTLBuffer> support_buf(void) {
+-    static __strong id<MTLBuffer> b; if (b) return b;
+-    b = [g_dev newBufferWithLength:65536 options:MTLResourceStorageModeShared]; res_add(b);   // All 0 when newly created
++    if (g_support_buf) return g_support_buf;
++    id<MTLBuffer> b = [g_dev newBufferWithLength:65536 options:MTLResourceStorageModeShared]; res_add(b);   // All 0 when newly created
+     const int render_scale_off = 192;   // Measured MSL layout: alpha_test 0, is_bgra[8] 16, viewport_inverse 144, viewport_size 160, frag_scale_count 176, render_scale float4[73] 192 (take .x)
+     for (int i = 0; i < 73; i++) *(float *)((uint8_t *)b.contents + render_scale_off + 16 * i) = 1.0f;
+-    return b;
++    g_support_buf = b; return b;
+ }
+-static uint64_t support_gpu(void) { static uint64_t gpu; if (!gpu) gpu = support_buf().gpuAddress; return gpu; }
++static uint64_t support_gpu(void) { if (!g_support_gpu) g_support_gpu = support_buf().gpuAddress; return g_support_gpu; }
+ // Raw global memory (binding kind DMSH_KIND_GMEM_MAP): a shader that loads or stores at an address it read from memory, which the translator could tie to no storage buffer
+ // (Ryujinx GlobalToStorage.TryGenerateRawStorageOp), finds the pool holding the address in this table and goes through a pointer to the pool's GPU address. Donkey Kong Bananza: gsys's
+ // vertex shader writes {count 0, instances 1} into each indirect draw record whose address its storage buffer lists, every frame before the terrain's culling refills them; with the
+@@ -12025,8 +12029,9 @@ static uint64_t gml_take(id<MTLBuffer> map) {
+     [g_commit_blocks addObject:^{ gml_read(log->b, log->map, predict, fence); }];
+     return b.gpuAddress;
+ }
+-static id<MTLBuffer> zero_bank(void) { static __strong id<MTLBuffer> b; if (!b) { b = [g_dev newBufferWithLength:65536 options:MTLResourceStorageModeShared]; res_add(b); } return b; }
+-static uint64_t zero_bank_gpu(void) { static uint64_t gpu; if (!gpu) gpu = zero_bank().gpuAddress; return gpu; }
++static id<MTLBuffer> g_zero_bank; static uint64_t g_zero_bank_gpu;
++static id<MTLBuffer> zero_bank(void) { if (!g_zero_bank) { g_zero_bank = [g_dev newBufferWithLength:65536 options:MTLResourceStorageModeShared]; res_add(g_zero_bank); } return g_zero_bank; }
++static uint64_t zero_bank_gpu(void) { if (!g_zero_bank_gpu) g_zero_bank_gpu = zero_bank().gpuAddress; return g_zero_bank_gpu; }
+ // Bindless handle (TEXU / SAMPU): the 32-bit word at byte offset off of uniform slot reg = the low 32 bits of the NVN handle the game wrote there (low 20 bits texture ID, high 12 bits sampler ID).
+ // Read on the CPU side at replay time (the memory at the same moment a real GPU would read it at execution); slot unbound / out of range / unreadable = 0 (empty slot: dummy texture / dummy sampler).
+ // A location with a GPU-side write queued in this submit (pend_hits) is still read at its current value; the first case is reported red.
+@@ -16489,15 +16494,17 @@ static void present_pipeline(MTLPixelFormat format) {
+ // Present samples the raw bytes stored in the swapchain texture (the Switch's scan-out sends the stored bytes as they are): an sRGB source is replaced by a non-sRGB view of the same storage,
+ // otherwise sampling decodes to linear first, the BGRA8Unorm layer does not encode again, and the whole picture comes out dark. Other formats are returned as they are (Mario's swapchain is RGBA8 and does not come here).
+ // View cache of 4 entries: swapchain textures live long and are few; a view holds its parent, so an equal parent pointer means the same object. A replaced view is released after the submissions that used it complete (Metal 4 does not retain resources)
++static __strong id<MTLTexture> g_present_raw_views[4];
++static int g_present_raw_next;
++static pthread_mutex_t g_present_raw_mu = PTHREAD_MUTEX_INITIALIZER;
+ static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
+     MTLPixelFormat pf = src.pixelFormat == MTLPixelFormatRGBA8Unorm_sRGB ? MTLPixelFormatRGBA8Unorm : src.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB ? MTLPixelFormatBGRA8Unorm : MTLPixelFormatInvalid;
+     if (pf == MTLPixelFormatInvalid) return src;
+-    static __strong id<MTLTexture> views[4]; static int next; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+-    pthread_mutex_lock(&mu);
++    pthread_mutex_lock(&g_present_raw_mu);
+     id<MTLTexture> v = nil;
+-    for (int i = 0; i < 4 && !v; i++) if (views[i] && views[i].parentTexture == src) v = views[i];
+-    if (!v && (v = [src newTextureViewWithPixelFormat:pf])) { if (views[next]) defer_obj_unref(views[next]); views[next] = v; next = (next + 1) & 3; }
+-    pthread_mutex_unlock(&mu);
++    for (int i = 0; i < 4 && !v; i++) if (g_present_raw_views[i] && g_present_raw_views[i].parentTexture == src) v = g_present_raw_views[i];
++    if (!v && (v = [src newTextureViewWithPixelFormat:pf])) { if (g_present_raw_views[g_present_raw_next]) defer_obj_unref(g_present_raw_views[g_present_raw_next]); g_present_raw_views[g_present_raw_next] = v; g_present_raw_next = (g_present_raw_next + 1) & 3; }
++    pthread_mutex_unlock(&g_present_raw_mu);
+     if (!v) { RED_ONCE(69, "present: cannot create a non-sRGB view of the sRGB swapchain texture (format %lu); presenting the decoded values", (unsigned long)src.pixelFormat); return src; }
+     return v;
+ }
+@@ -18021,6 +18028,21 @@ void dm_gfx_teardown(void) { @autoreleasepool {
+ 
+     g_arenas = nil; g_sub_arenas = nil; g_cur_arena = nil;
+     g_sp_heaps = nil; g_gml_free = nil; g_gmem_buf = nil; g_seen_buf = nil;
++    // A raw __data/__bss restore cannot run ARC releases. Drop these references here, after the queues have drained, before the shell resets the framework.
++    g_zero_fill = nil; g_zero_fill_size = 0;
++    g_vbuf_zero = nil; g_vbuf_zero_gpu = 0;
++    g_dummy_buf = nil; g_dummy_buf_gpu = 0;
++    g_support_buf = nil; g_support_gpu = 0;
++    g_zero_bank = nil; g_zero_bank_gpu = 0;
++    for (int i = 0; i < 8; i++) for (int j = 0; j < 3; j++) g_atomic_sink[i][j] = nil;
++    for (int i = 0; i < DMY_NT; i++) for (int j = 0; j < 4; j++) { g_dummy_tex[i][j] = nil; g_dummy_tex_rid[i][j] = 0; }
++    for (int i = 0; i < 8; i++) for (int j = 0; j < 4; j++) { g_dummy_img[i][j] = nil; g_dummy_img_rid[i][j] = 0; }
++    for (int i = 0; i < 4; i++) { g_dummy_tbuf[i] = nil; g_dummy_tbuf_rid[i] = 0; }
++    g_dummy_samp = nil; g_dummy_samp_rid = 0;
++    pthread_mutex_lock(&g_present_raw_mu);
++    for (int i = 0; i < 4; i++) g_present_raw_views[i] = nil;
++    g_present_raw_next = 0;
++    pthread_mutex_unlock(&g_present_raw_mu);
+     g_quad_ib = nil; g_fan_ib = nil;
+     g_up_texs = nil; g_up_views = nil; g_up_keep = nil;
+     g_up_block = nil; g_up_pblock = nil; g_ubs_buf = nil;
+diff --git a/dm/gfx/tests/Makefile b/dm/gfx/tests/Makefile
+index 455eaf0..0c1d850 100644
+--- a/dm/gfx/tests/Makefile
++++ b/dm/gfx/tests/Makefile
+@@ -753,3 +753,7 @@ check_t_sparse_copy: RUN_ENV = MTL_DEBUG_LAYER=1
+ t_bc_cpu: t_bc_cpu.m $(MTL_T_DEP)
+ 	clang $(CFLAGS) -fobjc-arc -o $@ t_bc_cpu.m $(MTL_T_SRC) $(FW)
+ check_t_bc_cpu: RUN_ENV = MTL_DEBUG_LAYER=1
++
++t_session_buffers: t_session_buffers.m $(MTL_T_DEP)
++	clang $(CFLAGS) -fobjc-arc -o $@ t_session_buffers.m $(MTL_T_SRC) $(FW)
++check_t_session_buffers: RUN_ENV = MTL_DEBUG_LAYER=1
+diff --git a/dm/gfx/tests/t_session_buffers.m b/dm/gfx/tests/t_session_buffers.m
+new file mode 100644
+index 0000000..4bab9e8
+--- /dev/null
++++ b/dm/gfx/tests/t_session_buffers.m
+@@ -0,0 +1,84 @@
++// Resource caches must release their ownership before the iOS shell restores __data/__bss.
++// Two real Metal sessions also check that newly returned resources belong to the new residency set.
++#include "../nvn/nvn_mtl.m"
++
++void *front_metal_layer(void) { return NULL; }
++module_t *module_of(const void *p) { (void)p; return NULL; }
++module_t *g_mod; int g_nmod;
++void svc_thread_dump(void) {}
++uint64_t now_ns(void) { return bp_now(); }
++
++static int checks, failed;
++#define CHECK(label, c) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
++
++static void session(int number) {
++    __weak id<MTLBuffer> wz, wd, ws, wb, wa, wv;
++    __weak id<MTLTexture> wt, wta;
++    __weak id<MTLTexture> wdt, wdi, wtb, wsrc, wview;
++    __weak id<MTLSamplerState> wds;
++    @autoreleasepool {
++        mtl_init();
++        CHECK("the session has a real residency set", g_res != nil);
++        @autoreleasepool {
++            res_commit();
++            NSSet *existing = [NSSet setWithArray:g_res.allAllocations];
++            bind_vbufs(nil, NULL);
++            res_commit();
++            id<MTLBuffer> vertexZero = nil;
++            for (id<MTLAllocation> allocation in g_res.allAllocations) {
++                if (![existing containsObject:allocation] && [allocation conformsToProtocol:@protocol(MTLBuffer)] && ((id<MTLBuffer>)allocation).length == 64) vertexZero = (id<MTLBuffer>)allocation;
++            }
++            wv = vertexZero;
++            CHECK("the vertex fallback registers a 64-byte buffer in each session", vertexZero != nil);
++            id<MTLBuffer> z = zero_buf(4096), d = dummy_buf(), s = support_buf(), b = zero_bank();
++            id<MTLTexture> t = dummy_img_atomic(MTLTextureType2D, NVN_DPF_FLOAT, 0);
++            id<MTLTexture> ta = dummy_img_atomic(MTLTextureTypeTextureBuffer, NVN_DPF_FLOAT, 0);
++            wz = z; wd = d; ws = s; wb = b; wt = t; wta = ta; wa = ta.buffer;
++            id<MTLTexture> dt = dummy_tex(MTLTextureType2D, NVN_DPF_FLOAT), di = dummy_img(MTLTextureType2D, NVN_DPF_FLOAT), tb = dummy_tbuf(NVN_DPF_FLOAT);
++            id<MTLSamplerState> ds = dummy_samp();
++            wdt = dt; wdi = di; wtb = tb; wds = ds;
++            MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm_sRGB width:128 height:128 mipmapped:NO];
++            desc.storageMode = MTLStorageModePrivate; desc.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
++            id<MTLTexture> src = [g_dev newTextureWithDescriptor:desc], view = present_raw_src(src);
++            wsrc = src; wview = view;
++            CHECK("the presentation cache owns a real view and its parent", view && view != src && view.parentTexture == src);
++            CHECK("dummy resource IDs belong to this session", g_dummy_tex_rid[MTLTextureType2D][NVN_DPF_FLOAT] == dt.gpuResourceID._impl && g_dummy_img_rid[MTLTextureType2D][NVN_DPF_FLOAT] == di.gpuResourceID._impl && g_dummy_tbuf_rid[NVN_DPF_FLOAT] == tb.gpuResourceID._impl && dummy_samp_rid() == ds.gpuResourceID._impl);
++            CHECK("zero fill, dummy, support and constant buffers exist", z && d && s && b);
++            CHECK("both atomic write sinks exist", t && ta && ta.buffer);
++            CHECK("cached GPU addresses belong to the current buffers", dummy_buf_gpu() == d.gpuAddress && support_gpu() == s.gpuAddress && zero_bank_gpu() == b.gpuAddress);
++            res_commit();
++            CHECK("zero fill buffer is resident", [g_res containsAllocation:z]);
++            CHECK("dummy buffer is resident", [g_res containsAllocation:d]);
++            CHECK("support buffer is resident", [g_res containsAllocation:s]);
++            CHECK("zero constant bank is resident", [g_res containsAllocation:b]);
++            CHECK("atomic texture is resident", [g_res containsAllocation:t]);
++            CHECK("atomic buffer texture's backing is resident", [g_res containsAllocation:ta.buffer]);
++            CHECK("dummy sampled texture is resident", [g_res containsAllocation:dt]);
++            CHECK("dummy image is resident", [g_res containsAllocation:di]);
++            CHECK("dummy buffer texture's backing is resident", [g_res containsAllocation:tb.buffer]);
++            CHECK("support render scales are initialized", ((float *)s.contents)[192 / 4] == 1.0f);
++        }
++        dm_gfx_teardown();
++    }
++    // After the autorelease pools have drained, only the production caches could own these objects.
++    CHECK("teardown releases the zero fill buffer", wz == nil);
++    CHECK("teardown releases the vertex fallback buffer", wv == nil);
++    CHECK("teardown releases the dummy buffer", wd == nil);
++    CHECK("teardown releases the support buffer", ws == nil);
++    CHECK("teardown releases the zero constant bank", wb == nil);
++    CHECK("teardown releases the atomic texture", wt == nil);
++    CHECK("teardown releases the atomic buffer texture and backing", wta == nil && wa == nil);
++    CHECK("teardown releases the sampled dummy texture", wdt == nil);
++    CHECK("teardown releases the dummy image", wdi == nil);
++    CHECK("teardown releases the buffer texture", wtb == nil);
++    CHECK("teardown releases the sampler", wds == nil);
++    CHECK("teardown releases the presentation view and its parent", wview == nil && wsrc == nil);
++    printf("session %d finished, %d checks, %d failed so far\n", number, checks, failed);
++}
++
++int main(void) {
++    session(1);
++    session(2);
++    printf("t_session_buffers: %d checks, %d failed\n", checks, failed);
++    return failed != 0;
++}
+diff --git a/docs/reference/memory.md b/docs/reference/memory.md
+index fc80711..95857fb 100644
+--- a/docs/reference/memory.md
++++ b/docs/reference/memory.md
+@@ -627,3 +627,11 @@ The guest address space, heaps, pools, virtual address memory and the allocators
+ - **Where it does not help:** a game that renders into a depth attachment this large: the same standalone program fails a load-and-draw pass into 12288x12288, scissored or not. Ocarina of Time only samples its 12288x12288 texture.
+ - **Check:** `t_zero_depth` (Depth16 and Depth32F from 17x5 to 16384x129, with levels, layers and a cube, poisoned and read back as zero on the GPU, and the number of copies a level takes; under the Metal validation layer). With the clear pass, its copy counts fail.
+ - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) (PR #2306: an M3 Pro, where about half the save loads ended at the 32-failures stop; 203 runs on its build with copies for depth textures of 16 MB and more, and a retry throttle not landed here, none failed).
++
++### Metal resource caches keep ownership after session teardown
++
++- **Symptom:** buffer, texture, sampler and presentation-view caches still own Metal objects after `dm_gfx_teardown`. A second backend session without a raw data reset returns some of those old resources without adding them to its new residency set.
++- **Cause:** function-local static strong references were unreachable by teardown. In the NX2Apple iOS shell, the subsequent `SegSnap` restore copies or zeros the framework's data sections without ARC releases. Those references are lost, leaking their objects. Reuse of those same references in the iPad's next game session is not established, because that restore clears them. A cached buffer texture retains its backing buffer, and a cached presentation view retains its swapchain texture too.
++- **Fix:** expose the resource caches to `dm_gfx_teardown`, release them after the graphics queues and presentation workers have drained, and clear their cached GPU addresses and resource IDs. This covers the zero-fill and vertex fallback buffers, dummy buffer and textures, support buffer, zero constant bank, atomic write sinks, dummy sampler and raw presentation views. Pipeline and library caches require a separate audit.
++- **Check:** `t_session_buffers` creates resources through the production helpers in two real Metal sessions, checks residency and GPU IDs, and uses weak references after both teardown and autorelease-pool drains to verify release. It does not run UIKit or the shell's raw segment restore, render the game, or reproduce the iPad kernel wait. `t_zero_depth` checks the zero-fill helper's GPU result separately.
++- **Found on:** while investigating [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) on an M2 iPad Pro with iPadOS 27.0.1. The ownership defect is reproduced on an M4 Max Mac. Its contribution to [the iPad residency-commit hang](rendering.md#a-residency-commit-does-not-return-on-an-ipad) is unproven, and that hang remains open.

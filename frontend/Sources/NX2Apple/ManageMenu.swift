@@ -39,7 +39,7 @@ struct ManageItem: Identifiable {
                                 enabled: !running && !game.inputs["base", default: []].isEmpty, run: a.rebuild)]
         if game.isReady {
             if game.onDevice {
-                items.append(.init(id: "device", symbol: "iphone", title: String(format: t("dev.open"), deviceName),
+                items.append(.init(id: "device", symbol: game.deviceSymbol, title: String(format: t("dev.open"), deviceName),
                                    enabled: !launching, run: a.openOnDevice))
             }
         }

@@ -82,8 +82,29 @@ final class OnboardingTests: IsolatedDefaultsTestCase {
         for platform in OnboardingPlatform.allCases {
             s.platform = .selected(platform)
             XCTAssertEqual(s.setupTasks.contains(.ios), platform != .mac)
-            XCTAssertEqual(s.setupTasks.count, platform == .mac ? 4 : 5)
+            XCTAssertEqual(s.setupTasks.contains(.vision), platform == .vision, "the visionOS platform only with an Apple Vision Pro")
+            XCTAssertEqual(s.setupTasks.count, platform == .mac ? 4 : (platform == .vision ? 6 : 5))
         }
+    }
+
+    func testOneTwoOrThreePlacesCanBeChosenAndTheChoiceIsStoredAsText() {
+        var choice = OnboardingPlatform.mac
+        XCTAssertEqual(choice.toggling(.mac), .mac, "the last place stays: the choice is never empty")
+        choice = choice.toggling(.vision)
+        XCTAssertEqual(choice.rawValue, "mac+vision")
+        XCTAssertTrue(choice.includesIOS && choice.includesVision)
+        choice = choice.toggling(.iphone)
+        XCTAssertEqual(choice.rawValue, "mac+iphone+vision")
+        XCTAssertEqual(choice.toggling(.vision), .both)
+        XCTAssertEqual(OnboardingPlatform.both.rawValue, "both", "what older versions stored for this Mac and an iPhone")
+        for text in ["mac", "iphone", "vision", "both", "mac+vision", "iphone+vision", "mac+iphone+vision"] {
+            XCTAssertEqual(OnboardingPlatform(rawValue: text)?.rawValue, text)
+        }
+        XCTAssertNil(OnboardingPlatform(rawValue: ""))
+        XCTAssertNil(OnboardingPlatform(rawValue: "mac+tv"))
+        var s = OnboardingState()
+        s.platform = .selected(OnboardingPlatform(places: [.mac, .iphone, .vision]))
+        XCTAssertEqual(s.setupTasks.count, 6)
     }
 
     func testResumeKeepsStepAndSelectionsWithoutPreferences() async {

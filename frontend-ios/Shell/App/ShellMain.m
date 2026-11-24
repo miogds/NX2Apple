@@ -6,6 +6,7 @@
 // framework's dm_glue_present_game(), which shows front_ios.m's game view and starts dm_main on the big-stack thread.
 // When the player quits from the in-game prompt, dm_shell_return_to_library() restores the framework's writable data segments and returns the window to the library.
 #import <UIKit/UIKit.h>
+#import <GameController/GameController.h>
 #include <TargetConditionals.h>
 #include <arpa/inet.h>
 #include <dlfcn.h>
@@ -406,6 +407,14 @@ static NSURL *shell_pick_launch_url(NSSet<UIOpenURLContext *> *contexts) {
     (void)session;
     self.window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
     self.window.backgroundColor = UIColor.blackColor;
+#if TARGET_OS_VISION
+    // visionOS turns a controller's buttons into pinches on the view the player looks at, unless the view asks for them through
+    // the Game Controller framework: only the direction pad then reached the library and the game. The window asks for them, so
+    // the library (ShellControllers) and the game view a framework puts into this window (front_ios.m) both get every button.
+    GCEventInteraction *pad = [GCEventInteraction new];
+    pad.handledEventTypes = GCUIEventTypeGamepad;
+    [self.window addInteraction:pad];
+#endif
     NSURL *initialURL = shell_pick_launch_url(o.URLContexts);
     g_library_vc = [ShellLibrary makeControllerWithInitialURL:initialURL];
     self.window.rootViewController = g_library_vc;

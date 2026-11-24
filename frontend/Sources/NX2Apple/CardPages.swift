@@ -48,7 +48,7 @@ struct CardPages: View {
                              onOpenControllers: onOpenControllers, onRunSetup: onRunSetup, controlChanges: controlChanges, padMerge: padMerge, buildFiles: buildFiles, buildingID: buildingID, onBuildFileDetails: onBuildFileDetails, category: $settingsCategory)
             } else {
                 LauncherPageScroll(memoryKey: "builds") {
-                    BuildPage(build: build, running: build.running, repo: repo, dependencies: dependencies, devices: devices, queue: queue, transfers: transfers, onSelectGames: onSelectGames, extrasOpen: $extrasOpen, logOpen: $logOpen,
+                    BuildPage(build: build, running: build.running, vision: build.buildsForShelf, launcherOperation: build.launcherOperation, repo: repo, dependencies: dependencies, devices: devices, queue: queue, transfers: transfers, onSelectGames: onSelectGames, extrasOpen: $extrasOpen, logOpen: $logOpen,
                               onViewGame: onViewGame, onOpenSettings: onOpenSettings)
                 }
             }

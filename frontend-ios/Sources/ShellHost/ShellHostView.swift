@@ -20,13 +20,33 @@ public struct ShellHostView: View {
                 Color.black.ignoresSafeArea()
                     .accessibilityIdentifier("deeplink.launching")
             } else {
-                LibraryView(games: model.details, controllers: model.controllers, actions: model.actions, input: model.input,
+                LibraryView(games: model.shownGames, controllers: model.controllers, actions: model.actions, input: model.input,
                             initialSelection: initialSelection, initialDetailOpen: initialDetailOpen, globalPadMap: model.globalPadMap,
                             padMerge: model.padMerge, padSnapshot: model.padSnapshot,
                             signingWarning: model.signingWarning,
                             onDismissSigningWarning: { model.dismissSigningWarning() },
                             canOpenHomeButtonSettings: model.canOpenHomeButtonSettings)
                     .disabled(model.launchingGame)
+                    .overlay(alignment: .top) {
+                        // On this device or on the Mac: which games the library shows, so a game that only the Mac has is
+                        // never taken for one that is here
+                        if model.hasMacSide, !model.launchingGame {
+                            VStack(spacing: 8) {
+                                Picker(hostText("Library"), selection: $model.librarySource) {
+                                    Text(verbatim: hostText("On this device (\(model.deviceGames.count))")).tag(LibrarySource.device)
+                                    Text(verbatim: hostText("On the Mac (\(model.macGames.count))")).tag(LibrarySource.mac)
+                                }
+                                .pickerStyle(.segmented)
+                                .frame(maxWidth: 420)
+                                .accessibilityIdentifier("library.source")
+                                if !model.librarySideNote.isEmpty {
+                                    Text(verbatim: model.librarySideNote).font(.footnote).foregroundStyle(.secondary)
+                                        .multilineTextAlignment(.center).frame(maxWidth: 520)
+                                }
+                            }
+                            .padding(.top, 14)
+                        }
+                    }
                     .overlay {
                         if model.launchingGame {
                             ZStack {

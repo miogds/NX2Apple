@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: miogds <miogds@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 15:29:20 +0100
+Subject: [PATCH] ios: the launcher's Play button compiles for visionOS
+
+visionOS has no Liquid Glass button styles (.glassProminent is unavailable in its SDK), the one error in the front end's Swift sources there. The button takes .borderedProminent on visionOS; iOS is unchanged.
+
+Upstream-Status: fork-only
+Reason: visionOS is outside upstream's support matrix: the launcher's Swift sources compile for its SDK
+Issue: none yet (miogds/NX2Apple, visionOS evaluation branch; to be filed before this goes to LNPANDY/NX2Apple)
+
+---
+ dm/ios/Sources/Launcher.swift | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/dm/ios/Sources/Launcher.swift b/dm/ios/Sources/Launcher.swift
+index 2e58a9a..4f10125 100644
+--- a/dm/ios/Sources/Launcher.swift
++++ b/dm/ios/Sources/Launcher.swift
+@@ -228,7 +228,11 @@ private struct LauncherView: View {
+ 
+     @ViewBuilder var playButton: some View {
+         let button = Button(action: start) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220) }.controlSize(.large).disabled(checking)
++        #if os(visionOS)   // no Liquid Glass button styles on visionOS
++        button.buttonStyle(.borderedProminent)
++        #else
+         if #available(iOS 26.0, *) { button.buttonStyle(.glassProminent) } else { button.buttonStyle(.borderedProminent) }
++        #endif
+         if checking {
+             VStack(spacing: 6) {
+                 HStack(spacing: 6) { ProgressView(); Text("Checking the cloud save…").font(.callout).foregroundStyle(.secondary) }

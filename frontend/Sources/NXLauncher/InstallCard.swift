@@ -20,7 +20,12 @@ package struct InstallCard: View {
     }
 
     package var body: some View {
-        if build.target != BuildTarget.mac, !build.running || sending || showLocked { card.disabled(build.running && !sending) }
+        // An Apple Vision Pro has its own two steps instead (VisionLauncherCard): nothing is installed or copied with a build
+        if build.target != BuildTarget.mac, !build.visionTarget, !build.running || sending || showLocked {
+            card.disabled(build.running && !sending)
+                .onChange(of: build.visionTarget) { _ in dropDeviceOfOtherPlatform() }
+                .onAppear { dropDeviceOfOtherPlatform() }
+        }
     }
 
     /// The copy of the game data runs on the build store's `running` flag too, and its own buttons must stay usable (Stop).
@@ -28,8 +33,15 @@ package struct InstallCard: View {
         switch build.send { case .sending, .copying: return true; default: return false }
     }
 
+    /// The platform the target card builds for (the IPA export has no device, so its menu is not shown).
+    private var platform: DevicePlatform { build.visionTarget ? .visionos : .ios }
+
+    private func dropDeviceOfOtherPlatform() {
+        if let chosen = devices.devices.first(where: { $0.id == devices.installDevice }), chosen.platform != platform { devices.installDevice = "" }
+    }
+
     private var card: some View {
-        let options = [(value: "", label: loc.t("dev.none"))] + devices.devices.map { d in
+        let options = [(value: "", label: loc.t("dev.none"))] + devices.devices.filter { $0.platform == platform }.map { d in
             (value: d.id, label: d.name + (d.reachable ? "" : " (" + loc.t("dev.notConnected") + ")"))
         }
         let teams = devices.teams.map { (value: $0.id, label: $0.label(personalTeam: loc.t("dev.personalTeam"))) }

@@ -26,7 +26,7 @@ package enum ShellInstall {
     }
 
     package static func derivedData(root: String) -> String { root + "/derived-data" }
-    package static func appPath(root: String) -> String { derivedData(root: root) + "/Build/Products/Release-iphoneos/" + appName }
+    package static func appPath(root: String) -> String { derivedData(root: root) + "/Build/Products/" + DevicePlatform(root: root).productsFolder + "/" + appName }
 
     /// The folder that mirrors every game's framework inside the shell folder: a game survives its build folder's deletion here.
     package static func frameworksMirror(root: String) -> String { root + "/frameworks" }
@@ -42,26 +42,27 @@ package enum ShellInstall {
     }
 
     /// The framework the build script's `--shell-framework <folder>` writes for a game.
-    package static func frameworkPath(workDir: String, titleID: String) -> String {
-        workDir + "/shell-framework/DmGame\(titleID).framework"
+    package static func frameworkPath(workDir: String, titleID: String, platform: DevicePlatform = .ios) -> String {
+        workDir + "/" + platform.frameworkFolder + "/DmGame\(titleID).framework"
     }
 
     /// The framework the build wrote in `<work>/shell-framework`. The script names it after the title ID it read from the game
     /// data, which a file name without a title ID does not carry (the build key is then the name plus a hash, #515), so the
     /// handoff takes the folder's own `DmGame*.framework`: the newest when an older build left a second one. nil when there is none.
-    package static func builtFramework(workDir: String, fm: FileManager = .default) -> String? {
-        let folder = workDir + "/shell-framework"
-        let names = ((try? fm.contentsOfDirectory(atPath: folder)) ?? [])
-            .filter { $0.hasPrefix("DmGame") && $0.hasSuffix(".framework") && $0.count > "DmGame.framework".count }
-        func modified(_ name: String) -> Date {
-            ((try? fm.attributesOfItem(atPath: folder + "/" + name))?[.modificationDate] as? Date) ?? .distantPast
+    /// `platform` nil: the newest of either platform's folder (the steps after a build, which follow whatever it made).
+    package static func builtFramework(workDir: String, platform: DevicePlatform? = nil, fm: FileManager = .default) -> String? {
+        let folders = (platform.map { [$0.frameworkFolder] } ?? DevicePlatform.frameworkFolders).map { workDir + "/" + $0 }
+        let paths = folders.flatMap { folder in
+            ((try? fm.contentsOfDirectory(atPath: folder)) ?? [])
+                .filter { $0.hasPrefix("DmGame") && $0.hasSuffix(".framework") && $0.count > "DmGame.framework".count }.map { folder + "/" + $0 }
         }
-        return names.max { (modified($0), $0) < (modified($1), $1) }.map { folder + "/" + $0 }
+        func modified(_ path: String) -> Date { ((try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date) ?? .distantPast }
+        return paths.max { (modified($0), ($0 as NSString).lastPathComponent) < (modified($1), ($1 as NSString).lastPathComponent) }
     }
 
     /// The part of the build script's argument list that makes the game's framework instead of an Xcode project.
-    package static func buildArguments(workDir: String, team: String) -> [String] {
-        ["--shell-framework", workDir + "/shell-framework"] + (team.isEmpty ? [] : ["--team-id", team])
+    package static func buildArguments(workDir: String, team: String, platform: DevicePlatform = .ios) -> [String] {
+        platform.scriptArguments + ["--shell-framework", workDir + "/" + platform.frameworkFolder] + (team.isEmpty ? [] : ["--team-id", team])
     }
 
     // ---- 4: the project ----
@@ -92,7 +93,7 @@ package enum ShellInstall {
         if let tmp { env["TMPDIR"] = tmp }
         if let package { env["DM_SHELL_PACKAGE"] = package }
         if let engine { env["DM_ENGINE_DIR"] = engine }
-        return env
+        return env.merging(DevicePlatform(root: root).environment) { _, sdk in sdk }
     }
 
     // ---- 5 and 6: sign, build, install ----
@@ -333,6 +334,8 @@ package struct ShellInstaller {
     /// Enabled by default; set `NX_DISABLE_HOT_INSTALL=1` to force full `xcodebuild` reinstalls.
     package var allowHotInstall = ProcessInfo.processInfo.environment["NX_DISABLE_HOT_INSTALL"] != "1"
     package var now: () -> Date = { Date() }
+    /// Set: the device downloads the game data from this Mac itself, and the install does not copy it (`offerDownload`).
+    package var dataSource: DataSourceOffer? = nil
 
     package init(xcrun: String = "/usr/bin/xcrun", repo: String, python: String, root: String, device: String, team: String) {
         self.xcrun = xcrun; self.repo = repo; self.python = python; self.root = root; self.device = device; self.team = team
@@ -419,6 +422,7 @@ package struct ShellInstaller {
             if !signed.notes.isEmpty { res.message = ([res.message] + signed.notes).joined(separator: "\n") }
             return res
         }
+        if let dataSource, let offered = offerDownload(dataSource, signed: signed) { return offered }
         // 7: the game data, only what the device does not have yet
         var result = copyGameData(titleID: titleID, archive: archive, app: signed.outcome.appPath,
                                   bundleID: signed.outcome.bundleID, outcome: signed.outcome, appJoinsParts: true)
@@ -428,10 +432,10 @@ package struct ShellInstaller {
 
     /// Steps 3 to 6: prepare the shared app's library and project, sign it, and install the app bundle on the device.
     func signAndInstallApp(framework: String, titleID: String, name: String) -> (outcome: Outcome, notes: [String]) {
-        guard FileManager.default.fileExists(atPath: framework) else {
+        guard framework.isEmpty || FileManager.default.fileExists(atPath: framework) else {   // empty: the app alone (`installLauncher`)
             return (missingFramework(framework, name: name), [])
         }
-        if let hot = tryHotInstall(games: [HotGame(framework: framework, titleID: titleID, name: name, pickedArtwork: pickedArtwork)]) {
+        if !framework.isEmpty, let hot = tryHotInstall(games: [HotGame(framework: framework, titleID: titleID, name: name, pickedArtwork: pickedArtwork)]) {
             return hot
         }
         // A device this Mac never paired is found out now, not after the signing: nothing is built for it

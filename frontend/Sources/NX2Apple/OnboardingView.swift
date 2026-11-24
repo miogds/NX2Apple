@@ -156,7 +156,7 @@ import NXLauncher
         case .games: games
         case .done:
             VStack(alignment: .leading, spacing: 18) {
-                requirement("onboarding.done.platform", value: t("onboarding.platform.\(state.selectedPlatform?.rawValue ?? "mac")"), okay: true)
+                requirement("onboarding.done.platform", value: (state.selectedPlatform ?? .mac).ordered.map { t($0.titleKey) }.joined(separator: ", "), okay: true)
                 requirement("onboarding.done.tools", value: t("onboarding.ready"), okay: true)
                 requirement("onboarding.done.keys", value: t(state.keys.statusKey), okay: state.keys == .valid ? true : nil)
             }.modifier(OnboardingCard())
@@ -196,9 +196,11 @@ import NXLauncher
 
     private var platforms: some View {
         HStack(alignment: .top, spacing: 16) {
-            ForEach(OnboardingPlatform.allCases, id: \.self) { platform in
-                let selected = state.selectedPlatform == platform
-                Button { driver.choosePlatform(platform) } label: {
+            // One card per place, and each is a switch: one, two or all three can be on
+            ForEach(OnboardingPlace.allCases, id: \.self) { platform in
+                let selected = state.selectedPlatform?.places.contains(platform) == true
+                let choose = { driver.choosePlatform(state.selectedPlatform?.toggling(platform) ?? OnboardingPlatform(places: [platform])) }
+                Button(action: choose) {
                     VStack(alignment: .leading, spacing: 18) {
                         HStack {
                             Image(systemName: platform.symbol).font(.system(size: 34, weight: .light))
@@ -206,8 +208,8 @@ import NXLauncher
                             Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                                 .foregroundStyle(selected ? LauncherPalette.accent : LauncherPalette.ink(0.2))
                         }.frame(height: 40, alignment: .top).accessibilityHidden(true)   // symbols differ in height: the titles stay on one line
-                        Text(t("onboarding.platform.\(platform.rawValue)")).font(.manrope(22, .bold))
-                        Text(t(platform.includesIOS ? "onboarding.platform.iosSize" : "onboarding.platform.macNote"))
+                        Text(t(platform.titleKey)).font(.manrope(22, .bold)).lineLimit(1).minimumScaleFactor(0.7)
+                        Text(t(platform.noteKey))
                             .font(.manrope(13)).foregroundStyle(LauncherPalette.secondaryText)
                             .fixedSize(horizontal: false, vertical: true)
                         Spacer(minLength: 0)
@@ -219,7 +221,7 @@ import NXLauncher
                 }
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(selected ? .isSelected : [])
-                .padTarget("onboarding.platform.\(platform.rawValue)", scope: "onboarding", radius: 14) { driver.choosePlatform(platform) }
+                .padTarget("onboarding.platform.\(platform.rawValue)", scope: "onboarding", radius: 14) { choose() }
             }
         }
     }

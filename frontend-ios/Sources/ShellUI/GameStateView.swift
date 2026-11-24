@@ -38,6 +38,7 @@ public struct GameStateView: View {
         case .playable: actions.onPlay(game.id)
         case .needsGameData, .needsDataUpdate: actions.onPickGameData(game.id)
         case .joiningGameData: break
+        case .downloadAvailable, .downloadingGameData: actions.onDownloadGameData(game.id)
         case .needsAppUpdate: actions.onAppUpdate()
         case .broken: actions.onShowLog(game.id)
         }

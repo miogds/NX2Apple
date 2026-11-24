@@ -8,6 +8,10 @@ public enum GameState: Equatable, Sendable {
     case needsDataUpdate(staleChain: Bool = false)
     /// Background `.nxpart` split-file assembly in `Documents/games/<titleID>/` with percentage and formatted byte counts.
     case joiningGameData(percent: Int, doneSize: String, totalSize: String)
+    /// The Mac that installed the game serves its data: the player downloads it here. `size` is what is still missing.
+    case downloadAvailable(size: String, source: String)
+    /// A download of the game's data in this app. Paused by the player, or by itself with `error` saying why.
+    case downloadingGameData(percent: Int, doneSize: String, totalSize: String, paused: Bool, error: String = "")
     case needsAppUpdate
     /// `reason` is one short line for under the title, such as "Game files damaged". `detail` is a plain sentence
     /// for the player (what happened, what to do), shown under the title and in the How to fix sheet. `technical`
@@ -276,6 +280,8 @@ public struct ShellActions {
     public var onPlay: (String) -> Void
     public var onChange: (_ gameID: String, _ settingID: String, _ value: String) -> Void
     public var onPickGameData: (String) -> Void
+    /// Starts the download of the game's data, pauses a running one, resumes a paused one.
+    public var onDownloadGameData: (String) -> Void = { _ in }
     public var onUseAppData: (String) -> Void
     public var onPickCloudSaves: (String) -> Void
     public var onDisableCloudSaves: (String) -> Void

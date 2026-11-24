@@ -121,7 +121,7 @@ extension BuildStore {
         runningTarget = self.target
 
         let isMac = self.target == BuildTarget.mac
-        if !isMac, !shellDeviceChecked, !exportsShell {
+        if !isMac, !shellDeviceChecked, !exportsShell, !buildsForShelf {
             guard installsDirectly else {
                 doneNote = t("shell.needsDevice")
                 done = false
@@ -231,7 +231,7 @@ extension BuildStore {
             tempEnvURL = envURL
             args += ["--env-file", envURL.path]
             if bcOnCPU { say(t("msg.bcOn")) }
-            args += ShellInstall.buildArguments(workDir: workDir, team: exportsShell ? "" : devices.signingTeam)
+            args += ShellInstall.buildArguments(workDir: workDir, team: exportsShell ? "" : devices.signingTeam, platform: devicePlatform)
         }
 
         let repoPath = repo.path
@@ -433,8 +433,8 @@ extension BuildStore {
                         self.finishOneGameIPA()
                     } else {
                         let key = self.buildKey
-                        let fw = ShellInstall.builtFramework(workDir: self.effectiveWorkDir)
-                            ?? ShellInstall.frameworkPath(workDir: self.effectiveWorkDir, titleID: key)
+                        let fw = ShellInstall.builtFramework(workDir: self.effectiveWorkDir, platform: self.devicePlatform)
+                            ?? ShellInstall.frameworkPath(workDir: self.effectiveWorkDir, titleID: key, platform: self.devicePlatform)
                         let outTID = ShellInstall.titleID(ofFramework: fw)
                         self.packArchive(workDir: self.effectiveWorkDir, titleID: outTID) { archive in
                             if self.deferShellPackaging {

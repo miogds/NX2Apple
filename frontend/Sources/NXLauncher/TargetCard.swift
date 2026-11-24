@@ -15,8 +15,11 @@ package struct TargetCard: View {
                 .padding(.leading, 2)
             HStack(spacing: 14) {
                 targetCard(BuildTarget.mac, symbol: "desktopcomputer", title: "build.mac", note: "build.macNote")
-                targetCard(BuildTarget.ios, symbol: "iphone", title: "build.ios", note: "build.iosNote")
+                targetCard(BuildTarget.ios, symbol: "ipad.and.iphone", title: "build.ios", note: "build.iosNote")
+                // The same shared app built for visionOS, with a library of its own on the headset
+                targetCard(BuildTarget.ios, vision: true, symbol: "visionpro", title: "build.vision", note: "build.visionNote")
             }
+            .fixedSize(horizontal: false, vertical: true)
             // A Switch 2 game (#445): how far the engine's support goes, for the chosen target. Nothing is blocked: the engine
             // builds both, and one Switch 2 game ran on an iPhone, but no target is tested for every game.
             if build.isSwitch2Game {
@@ -31,7 +34,7 @@ package struct TargetCard: View {
                 .padding(.horizontal, 4).padding(.top, 2)
             }
             // A Mac app runs on this Mac's GPU, which always decodes BC textures: the switch is the iPhone's only.
-            if build.target != BuildTarget.mac {
+            if build.target != BuildTarget.mac, !build.visionTarget {
                 VStack(spacing: 0) {
                     HStack(alignment: .center, spacing: 12) {
                         VStack(alignment: .leading, spacing: 3) {
@@ -51,11 +54,14 @@ package struct TargetCard: View {
         }
     }
 
-    private func targetCard(_ value: String, symbol: String, title: String, note: String) -> some View {
+    private func targetCard(_ value: String, vision: Bool = false, symbol: String, title: String, note: String) -> some View {
         let macOnlyBlocked = value == BuildTarget.ios && build.isMacNativeGamesSelected
-        let selected = build.target == value && !macOnlyBlocked
+        let selected = build.target == value && !macOnlyBlocked && (value == BuildTarget.mac || build.visionTarget == vision)
         let displayNote = macOnlyBlocked ? "upstream.mngMacOnly" : note
-        return Button { build.target = value } label: {
+        return Button {
+            if value != BuildTarget.mac { build.visionTarget = vision }
+            build.target = value
+        } label: {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(alignment: .top) {
                     Image(systemName: symbol).font(.system(size: 26, weight: .light))
@@ -69,7 +75,7 @@ package struct TargetCard: View {
                     Text(loc.t(displayNote)).font(.manrope(12.5)).foregroundStyle(LauncherPalette.secondaryText).fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .padding(20).frame(maxWidth: .infinity, alignment: .leading)
+            .padding(20).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(selected ? LauncherPalette.selectedFill : LauncherPalette.selectableFill, in: RoundedRectangle(cornerRadius: 14))
             .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(selected ? LauncherPalette.selectedBorder : LauncherPalette.selectableBorder, lineWidth: selected ? 1.5 : 1))
             .contentShape(RoundedRectangle(cornerRadius: 14))

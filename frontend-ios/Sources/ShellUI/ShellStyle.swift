@@ -421,6 +421,8 @@ extension GameState {
         case .needsGameData: ShellStrings.text("Missing Data")
         case .needsDataUpdate: ShellStrings.text("Update Data")
         case .joiningGameData: ShellStrings.text("Joining Data")
+        case .downloadAvailable: ShellStrings.text("Download Data")
+        case .downloadingGameData(_, _, _, let paused, _): paused ? ShellStrings.text("Download Paused") : ShellStrings.text("Downloading")
         case .needsAppUpdate: ShellStrings.text("Update Required")
         case .broken: ShellStrings.text("Fix Game Files")
         default: nil
@@ -435,6 +437,9 @@ extension GameState {
         case .needsGameData: ShellStrings.text("Needs game data")
         case .needsDataUpdate(let stale): stale ? ShellStrings.text("Data update needed") : ShellStrings.text("Needs updated data")
         case .joiningGameData(let percent, _, _): ShellStrings.text("Joining game data (\(Self.percentText(percent)))")
+        case .downloadAvailable: ShellStrings.text("Game data ready to download")
+        case .downloadingGameData(let percent, _, _, let paused, _):
+            paused ? ShellStrings.text("Download paused (\(Self.percentText(percent)))") : ShellStrings.text("Downloading game data (\(Self.percentText(percent)))")
         case .needsAppUpdate: ShellStrings.text("App update needed")
         case .broken(let reason, _, _): reason.isEmpty ? ShellStrings.text("Unavailable") : reason
         }
@@ -442,7 +447,7 @@ extension GameState {
     var color: Color {
         switch self {
         case .playable: ShellPalette.ready
-        case .joiningGameData: ShellPalette.cream
+        case .joiningGameData, .downloadAvailable, .downloadingGameData: ShellPalette.cream
         case .needsGameData, .needsDataUpdate, .needsAppUpdate, .broken: ShellPalette.attention
         }
     }
@@ -452,6 +457,11 @@ extension GameState {
         case .needsGameData: ""
         case .joiningGameData(_, let doneSize, let totalSize):
             ShellStrings.text("Joining split data files on this device (\(doneSize) of \(totalSize)). Play unlocks automatically when finished.")
+        case .downloadAvailable(let size, let source):
+            ShellStrings.text("\(source) has this game's data (\(size)). Keep NX2Apple open on the Mac while it downloads.")
+        case .downloadingGameData(_, let doneSize, let totalSize, _, let error):
+            ShellStrings.text("\(doneSize) of \(totalSize).") + " "
+                + (error.isEmpty ? ShellStrings.text("The download goes on while this app is not in front.") : error)
         case .needsAppUpdate: ""
         case .broken: ""
         }
@@ -462,6 +472,9 @@ extension GameState {
         case .needsGameData: ShellStrings.text("Choose game data…")
         case .needsDataUpdate: ShellStrings.text("Update game data…")
         case .joiningGameData(let percent, _, _): ShellStrings.text("Joining game data (\(Self.percentText(percent)))")
+        case .downloadAvailable(let size, _): ShellStrings.text("Download (\(size))")
+        case .downloadingGameData(let percent, _, _, let paused, _):
+            paused ? ShellStrings.text("Resume download (\(Self.percentText(percent)))") : ShellStrings.text("Pause download (\(Self.percentText(percent)))")
         case .needsAppUpdate: ShellStrings.text("How to update")
         case .broken: ShellStrings.text("How to fix")
         }
@@ -472,6 +485,8 @@ extension GameState {
         case .needsGameData: "folder"
         case .needsDataUpdate: "arrow.triangle.2.circlepath"
         case .joiningGameData: "arrow.triangle.merge"
+        case .downloadAvailable: "arrow.down.circle"
+        case .downloadingGameData(_, _, _, let paused, _): paused ? "play.circle" : "pause.circle"
         case .needsAppUpdate: "arrow.up.circle"
         case .broken: "wrench.and.screwdriver"
         }
@@ -577,6 +592,8 @@ extension GameState {
         case .needsGameData: ShellStrings.text("Choose")
         case .needsDataUpdate: ShellStrings.text("Update")
         case .joiningGameData: ShellStrings.text("Joining Data")
+        case .downloadAvailable: ShellStrings.text("Download")
+        case .downloadingGameData(let percent, _, _, let paused, _): paused ? ShellStrings.text("Resume") : Self.percentText(percent)
         case .needsAppUpdate: ShellStrings.text("How to update")
         case .broken: ShellStrings.text("How to fix")
         }

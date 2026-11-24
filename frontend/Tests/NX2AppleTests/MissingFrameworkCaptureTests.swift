@@ -23,7 +23,7 @@ final class MissingFrameworkCaptureTests: IsolatedDefaultsTestCase {
         // NX_CAPTURE_NOTE puts a note of the old wording into the card for the "before" image
         model.doneNote = ProcessInfo.processInfo.environment["NX_CAPTURE_NOTE"]
             ?? installer.export(framework: missing, titleID: "0100000000010000", name: "Super Mario Odyssey").message
-        let card = ActionCard(build: model, dependencies: stores.dependencies, repo: stores.repo)
+        let card = ActionCard(build: model, dependencies: stores.dependencies, repo: stores.repo, devices: stores.deviceStore)
             .environmentObject(stores.localizer).padding(24).frame(width: 760)
             .background(Color(white: 0.09)).environment(\.colorScheme, .dark)
         NSApplication.shared.setActivationPolicy(.accessory)

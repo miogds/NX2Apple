@@ -92,6 +92,12 @@ extension GameLibrary {
             let mirror = ShellInstall.mirroredFramework(root: root, titleID: games[i].titleID)
             let hasFramework = fm.fileExists(atPath: mirror)
 
+            let onShelf = !tid.isEmpty && fm.fileExists(atPath: ShellInstall.shelf(root: DevicePlatform.visionos.root(root), titleID: tid))
+            if games[i].onVisionShelf != onShelf {
+                games[i].onVisionShelf = onShelf
+                changed = true
+            }
+
             let newHasFramework = inShell || hasFramework
             if games[i].hasShellFramework != newHasFramework {
                 games[i].hasShellFramework = newHasFramework
@@ -159,6 +165,43 @@ extension LibraryGame {
         guard !installedDevice.isEmpty else { return false }
         return hasIOSApp || installedViaShellReceipt
     }
+
+    /// The installed shared app is the visionOS one: its path names its shell folder, and the headset's has one of its own.
+    private var appIsVision: Bool {
+        ShellInstall.paths(ofApp: iosAppPath).map { DevicePlatform(root: $0.root) == .visionos } ?? false
+    }
+
+    /// Built for an Apple Vision Pro: installed with the headset's app, or kept on this Mac for the headset to download.
+    var hasVisionBuild: Bool { onVisionShelf || (hasIOSApp && appIsVision) }
+
+    /// Built for an iPhone or iPad. `hasIOSBuild` counts the headset's app too (it is recorded the same way), so that is taken out.
+    var hasIPhoneBuild: Bool { hasIPA || hasShellFramework || installedViaShellReceipt || (hasIOSApp && !appIsVision) }
+
+    /// Built for a device of either kind.
+    var hasDeviceBuild: Bool { hasIOSBuild || onVisionShelf }
+
+    /// The device the installed app is on, else the only kind of device this game was built for.
+    var devicePlatform: DevicePlatform {
+        if hasIOSApp { return appIsVision ? .visionos : .ios }
+        return hasVisionBuild && !hasIPhoneBuild ? .visionos : .ios
+    }
+
+    /// The library's status line for a game that is not being built. It names every platform the game was built for.
+    var statusKey: String {
+        switch (isReady, hasIPhoneBuild, hasVisionBuild) {
+        case (true, true, true): return "library.readyAll"
+        case (true, true, false): return "library.readyMacAndIOS"
+        case (true, false, true): return "library.readyMacAndVision"
+        case (true, false, false): return "library.ready"
+        case (false, true, true): return "library.readyIOSAndVision"
+        case (false, false, true): return onDevice ? "library.readyOnVision" : "library.readyVision"
+        case (false, true, false): return onDevice ? "library.readyOnIOS" : (isOlderIOSBuild ? "library.olderIOS" : "library.readyIOS")
+        case (false, false, false): return hasIOSBuild ? "library.readyIOS" : "library.notBuilt"
+        }
+    }
+
+    /// The symbol of the device the game is on: the headset for a Vision Pro build.
+    var deviceSymbol: String { devicePlatform == .visionos ? "visionpro" : "iphone" }
 
     /// An iPhone or iPad game runs only cheats that write data.
     var cheatsNeedIOSNote: Bool { hasIOSBuild || onDevice }

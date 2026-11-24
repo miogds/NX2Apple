@@ -531,7 +531,8 @@ extension BuildStore {
             cacheIDs.append(candidate)
         }
         for cacheID in cacheIDs {
-            let metaPath = workDir + "/shell-framework/.msl-cache/" + cacheID + ".json"
+            let container = builtFW.map { ($0 as NSString).deletingLastPathComponent } ?? workDir + "/shell-framework"
+            let metaPath = container + "/.msl-cache/" + cacheID + ".json"
             if let data = fm.contents(atPath: metaPath),
                let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
                 let libPath = (json["lib_path"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -560,7 +561,7 @@ extension BuildStore {
         let expectedChain = (manifestChain?.isEmpty == false) ? manifestChain
             : EngineLayout.shaderChain(repo: repoPath).map { "b-" + $0 }
 
-        let shaderIOS = workDir + "/shader/ios"
+        let shaderIOS = workDir + "/shader/" + DevicePlatform(framework: builtFW).shaderFolder   // a visionOS build's libraries are in shader/xros
         var isDir: ObjCBool = false
         if fm.fileExists(atPath: shaderIOS, isDirectory: &isDir), isDir.boolValue,
            let entries = try? fm.contentsOfDirectory(atPath: shaderIOS) {

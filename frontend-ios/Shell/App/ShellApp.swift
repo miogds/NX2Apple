@@ -71,7 +71,7 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
             ShellHostBeacon.write(to: documents, glueVersion: glueVer)
         }
         let frameworks = Bundle.main.privateFrameworksURL ?? Bundle.main.bundleURL.appendingPathComponent("Frameworks", isDirectory: true)
-        let config = ShellHostConfig(
+        var config = ShellHostConfig(
             gamesRoot: frameworks,
             appDataRoot: ShellHostConfig.defaultAppDataRoot(),
             hotFrameworksRoot: ShellHostConfig.defaultHotFrameworksRoot(),
@@ -84,6 +84,9 @@ private func withCStrings<R>(_ strings: [String], _ body: (UnsafePointer<UnsafeP
                 dm_shell_request_stop_game()
             }
         )
+        // Game data the player downloads here from the Mac that installed the app (DataDownloads.swift)
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? FileManager.default.temporaryDirectory
+        config.downloads = (support.appendingPathComponent("data-downloads", isDirectory: true), (Bundle.main.bundleIdentifier ?? "org.nxnative.shell") + ".data-downloads")
         let model = ShellHostModel(config: config, launcher: EngineGameLauncher(), picker: DocumentFolderPicker())
         activeModel = model
         model.startControllers()
