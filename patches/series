@@ -64,3 +64,6 @@
 0066-shaders-xros-metal-py-runs-the-chain-s-tools-wit.patch
 0067-nsp-script-platform-visionos-builds-a-game-for-a.patch
 0068-nsp-script-a-visionos-build-names-its-shader-sta.patch
+0069-diagnostics-trace-residency-and-shell-teardown-w.patch
+0070-gfx-release-resource-caches-before-resetting-a-s.patch
+0071-gfx-release-program-and-specialization-caches-on.patch

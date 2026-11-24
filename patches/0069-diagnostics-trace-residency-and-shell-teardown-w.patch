@@ -1,0 +1,358 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jorge Trigger <lordchronotrigger@gmail.com>
+Date: Wed, 18 Nov 2026 15:55:38 +0100
+Subject: [PATCH] Diagnostics: trace residency and shell teardown waits
+
+An M2 iPad stackshot places a black-screen replay thread inside Metal residency
+commit. Record the batch and caller before that call, and the shell teardown
+steps before their waits, with opt-in synchronous checkpoints. Preserve the
+existing lock and teardown ordering. No recovery or root-cause fix is claimed.
+
+The related upstream report is a different game and device. This local
+diagnostic has not been submitted upstream.
+
+Upstream-Status: pending
+Reason: Identify the next black-screen and exit wait on the personal iPad build
+Issue: seedds/nxnative#2098 (related wait, shared cause unconfirmed)
+---
+ dm/games/0400486024DEC000/README.md |  4 +-
+ dm/gfx/nvn/nvn_mtl.m                | 46 +++++++++++++-
+ dm/gfx/tests/Makefile               |  5 ++
+ dm/gfx/tests/t_res_trace.m          | 97 +++++++++++++++++++++++++++++
+ dm/host/hle_lifecycle.c             | 75 ++++++++++++----------
+ docs/reference/rendering.md         |  8 +++
+ 6 files changed, 201 insertions(+), 34 deletions(-)
+ create mode 100644 dm/gfx/tests/t_res_trace.m
+
+diff --git a/dm/games/0400486024DEC000/README.md b/dm/games/0400486024DEC000/README.md
+index 44b18eb..a4b6b52 100644
+--- a/dm/games/0400486024DEC000/README.md
++++ b/dm/games/0400486024DEC000/README.md
+@@ -115,7 +115,7 @@ From an empty save: at about 45 s `A` (title), `A` (New Game), then the movie. F
+ - The "Navi" name label in the Great Deku Tree scene was missing on an earlier chain and has not been checked since. Not played yet: the Deku Tree dungeon, combat, later areas. Sound opens with no red line; movies and speech were not listened to. Physics issues reported in PR 1299 were not seen on this route (walking, the ladder, the camera).
+ - Resolved: dotted horizontal rows across the picture in play, in fog and light (GitHub issue 1537): the agl_ndsr_vr networks' HMMA calls outside a chain overwrote an accumulator a chain held ([An HMMA outside a chain overwrote the chain's accumulator](../../../docs/reference/shaders.md#an-hmma-outside-a-chain-overwrote-the-chains-accumulator)), since chain 23a1ea1db092; found by bisecting chains on the Kokiri Forest autosave (0f510fd5's chain clean, bd9f422d's not). Under the game's upscaler they had also grown into white blotches: [LDSM reads rows other lanes stored](../../../docs/reference/shaders.md#ldsm-reads-rows-other-lanes-stored).
+ - Open: GPU hangs in play ([#1326](https://github.com/seedds/nxnative/issues/1326), [#1605](https://github.com/seedds/nxnative/issues/1605)), repeatable in a Kokiri Forest conversation and the Impa escort on an M2 Pro and gone with the pipelines of task `a5288d0a6c4971fd` dropped ([#2011](https://github.com/seedds/nxnative/issues/2011)). They are not [threads returning before a barrier](../../../docs/reference/shaders.md#compute-threads-that-return-before-a-barrier): that task, the culling tasks `47f9b38490dcf9a2` and `99280b7b8aae78df` and mesh `3439aaa071d868ae` have no barrier in their bodies (none of the game's 520 task and mesh shaders has one). The lead in #2011 is pixel shader `bd09ab5fc4fd7680`'s light loop, which runs `min(count, 1000) + 1` times per pixel with per-tile counts the GPU reads.
+-- No iOS shader build or iPhone run has been done. Its memory use makes an iPhone unlikely as it stands.
++- A personal iPad build (v131072, M2 iPad Pro, iPadOS 27.0.1) reached the title, but intermittently stays black and cannot finish exiting. This is not a validated iPhone or iPad release. See the open residency wait below.
+ 
+ ## Unused border corrections
+ 
+@@ -131,6 +131,8 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25
+ 
+ ## Found on this game
+ 
++- Open: [a residency commit does not return on an iPad](../../../docs/reference/rendering.md#a-residency-commit-does-not-return-on-an-ipad). A device stackshot identifies the replay thread's driver call and the guest main thread waiting behind it. Opt-in residency and teardown checkpoints gather the next failure, without changing rendering or claiming a fix.
++
+ - [GPU frame captures need pipelines built through the device](../../../docs/reference/shaders.md#gpu-frame-captures-need-pipelines-built-through-the-device): fixed for every game ([PR #2688](https://github.com/seedds/nxnative/pull/2688)). An M1 session with `MTL_CAPTURE_ENABLED=0` left set ran without the Metal 4 pipelines: `hybrid pipelines off`, 467 pipeline stalls of about 170 ms and one 84 s freeze. The host now asks Metal whether the run can capture.
+ - [A scene that does not fit the shorter hold probed against another scene's GPU time](../../../docs/reference/frame-rate.md#a-scene-that-does-not-fit-the-shorter-hold-probed-against-another-scenes-gpu-time): fixed in the frame step for every game. Hyrule Field at night on an M2 Pro (22 failed probes a minute, 159 frames at 20 fps, PR [#2611](https://github.com/seedds/nxnative/pull/2611)) and Kokiri Forest at each turn of the camera on an Android port. On an M4 Pro at render scale 1.333, standing at the Hyrule Field save point: 9 and 13 failed probes a run before, 2 after; the M2 Pro retest is open.
+ - [A frame's submissions queued behind its first one while the iPhone's GPU clock is low](../../../docs/reference/frame-rate.md#a-frames-submissions-queued-behind-its-first-one-while-the-iphones-gpu-clock-is-low): the stalls resolved by holding the submissions that end behind running work and committing them together, each in its own command buffer ([PR #2645](https://github.com/seedds/nxnative/pull/2645)); the low clock itself open. On the iPhone 17 at the 30 fps cap (2026-11-14) the game fell to 5-10 fps in Hyrule Field and Kakariko Village by night and to 12 fps in a fairy fountain (640 draws), also after a restart, for no more work than by day. With the fix (the owner's play, about 30 minutes): about 17 fps in those places by night against about 9, 30 fps in most of the rest (frame p50 33.3 ms, `GPU p50` 29-30 ms), and none of the first version's pink and dark flashes or GPU errors. The slow windows left are no longer GPU-bound (`GPU p50` 13-20 ms, the submit thread 11-24 ms at 1.3-1.7 GHz, pipeline bases compiling in the background): separate work, open. That session ended in a memory kill (`JetsamEvent`, the app at 4.2 GB) at the village's entrance to the castle grounds, in a frame that loaded 301 new textures (204 MB): not attributed, open. On the M6 (2026-11-15, `save_village` with the encode thread on, two runs a side against main `f226affd`): `NVN submit+present` p50 3.2-3.4 ms against 4.1-5.5 ms, `GPU p50` and the locked 60 fps unchanged, no `[RED]` line. Open: this version's frame-by-frame numbers on the iPhone, and what releasing held work on the GPU's own event saves there (`DM_NVN_SUB_MERGE=ab:1,2/3 DM_NVN_SUB_IDLE_FB=ab:1/3 DM_AB=900`).
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index 75504e6..4cedf35 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -608,6 +608,8 @@ - (void)dealloc { res_remove(raw); }
+ static char g_atomic_raw_key;
+ // DM_RES_CHECK=1 (diagnostic): if textures / buffers the shader accesses through the argument block are not in the residency set, print the first 40 (textures are attributed to the actual allocation via parent texture / underlying buffer)
+ static int g_res_check_on;
++static int g_res_trace;
++static _Atomic uint64_t g_res_trace_seq;
+ // It also keeps the submission that last bound each texture or buffer, for defer_drain: an object retired behind an earlier fence than a binding's goes while that binding is on the GPU, which this
+ // check cannot see at the binding (it is still in the set then). A texture gone that way faults or, with its resource ID reused, reads another texture, measured on an M4 Pro: a freed texture's resource ID went to the next texture made
+ static NSMapTable *g_res_last_use; static uint64_t g_res_late;
+@@ -632,22 +634,63 @@ static void res_check(id r, const char *what, int reg) {
+ }
+ // Applies and commits every change made before the call. A change another thread's commit took is in the set when this returns too: that commit holds g_res_commit_mu until it is
+ // done. Each change holds its allocation until it is committed, so a removed one stays alive until it has left the set
+-static void res_commit(void) { @autoreleasepool {
++// Opt-in, synchronous checkpoints: the final begin line survives even if Metal never
++// returns. Do not start a watchdog or inspect guest bytes from a second thread.
++static void res_trace_batch(uint64_t seq, const char *caller, res_op *q, size_t n) {
++    uint64_t bytes[2] = {0}, shared = 0;
++    size_t count[2] = {0};
++    id<MTLAllocation> top[8] = {nil};
++    for (size_t i = 0; i < n; i++) {
++        id<MTLAllocation> a = (__bridge id<MTLAllocation>)q[i].o;
++        uint64_t size = a.allocatedSize;
++        int add = q[i].add != 0;
++        bytes[add] += size; count[add]++;
++        if (!add) continue;
++        if ([(id)a conformsToProtocol:@protocol(MTLBuffer)] && ((id<MTLBuffer>)a).storageMode == MTLStorageModeShared) shared += size;
++        for (size_t k = 0; k < 8; k++) if (!top[k] || size > top[k].allocatedSize) {
++            for (size_t j = 7; j > k; j--) top[j] = top[j - 1];
++            top[k] = a; break;
++        }
++    }
++    MLOG("res trace #%llu %s batch: add %zu / %llu bytes (shared buffers %llu), remove %zu / %llu bytes, fence submitted %llu / completed %llu",
++         (unsigned long long)seq, caller, count[1], (unsigned long long)bytes[1], (unsigned long long)shared,
++         count[0], (unsigned long long)bytes[0], (unsigned long long)atomic_load(&g_fence), (unsigned long long)atomic_load(&g_done));
++    if (bytes[1] < (16u << 20) && count[1] < 128) return;
++    for (size_t k = 0; k < 8 && top[k]; k++) {
++        id<MTLAllocation> a = top[k];
++        id<MTLBuffer> b = [(id)a conformsToProtocol:@protocol(MTLBuffer)] ? (id<MTLBuffer>)a : nil;
++        MLOG("res trace #%llu largest add %zu: %s object %p bytes %llu storage %ld cpu %p",
++             (unsigned long long)seq, k, b ? "buffer" : [(id)a conformsToProtocol:@protocol(MTLTexture)] ? "texture" : "heap",
++             (__bridge void *)a, (unsigned long long)a.allocatedSize, b ? (long)b.storageMode : -1L,
++             b && b.storageMode == MTLStorageModeShared ? b.contents : NULL);
++    }
++}
++static void res_commit_at(const char *caller) { @autoreleasepool {
++    uint64_t seq = g_res_trace ? atomic_fetch_add(&g_res_trace_seq, 1) + 1 : 0;
++    uint64_t began = seq ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
++    if (seq) MLOG("res trace #%llu %s begin lock", (unsigned long long)seq, caller);
+     pthread_mutex_lock(&g_res_commit_mu);
++    if (seq) MLOG("res trace #%llu %s lock acquired, begin queue", (unsigned long long)seq, caller);
+     pthread_mutex_lock(&g_res_mu);
+     res_op *q = g_res_q; size_t n = g_res_qn; g_res_q = NULL; g_res_qn = g_res_qcap = 0;
+     pthread_mutex_unlock(&g_res_mu);
+     if (n) {
++        if (seq) res_trace_batch(seq, caller, q, n);
+         uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++        if (seq) MLOG("res trace #%llu %s begin apply", (unsigned long long)seq, caller);
+         for (size_t i = 0; i < n; i++) { if (q[i].add) [g_res addAllocation:(__bridge id<MTLAllocation>)q[i].o]; else [g_res removeAllocation:(__bridge id<MTLAllocation>)q[i].o]; }
++        if (seq) MLOG("res trace #%llu %s begin Metal commit", (unsigned long long)seq, caller);
+         [g_res commit];
++        if (seq) MLOG("res trace #%llu %s Metal commit returned", (unsigned long long)seq, caller);
+         uint64_t dt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
+         pthread_mutex_lock(&g_res_mu); g_rs_commits++; g_rs_commit_ns += dt; pthread_mutex_unlock(&g_res_mu);
+     }
+     pthread_mutex_unlock(&g_res_commit_mu);
+     for (size_t i = 0; i < n; i++) CFRelease(q[i].o);
+     free(q);
++    if (seq) MLOG("res trace #%llu %s end %.3f ms", (unsigned long long)seq, caller, (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - began) / 1e6);
+ } }
++#define res_commit() res_commit_at(__func__)
+ static int res_pending(void) { pthread_mutex_lock(&g_res_mu); int n = g_res_qn != 0; pthread_mutex_unlock(&g_res_mu); return n; }
+ // What the residency set holds: totals by kind and the largest objects. At the first GPU out-of-memory error (the error names none of them), and for DM_CTL "restop" (hle_hid.c). The set holds
+ // the game's pools (shared buffers over guest memory), textures, heaps and staging alike
+@@ -875,6 +918,7 @@ void mtl_init(void) {
+     const char *latency = getenv("DM_PRESENT_LATENCY");
+     if (latency && atoi(latency) > 0) g_present_latency = atoi(latency);
+     g_res_check_on = getenv("DM_RES_CHECK") != NULL;
++    g_res_trace = getenv("DM_RES_TRACE") && atoi(getenv("DM_RES_TRACE")) != 0;
+     g_dev = MTLCreateSystemDefaultDevice();
+     if (!g_dev) MDIE("no Metal device");
+     if (!g_dev.hasUnifiedMemory) MDIE("needs a unified-memory device (zero-copy memory pools)");
+diff --git a/dm/gfx/tests/Makefile b/dm/gfx/tests/Makefile
+index fd6e819..455eaf0 100644
+--- a/dm/gfx/tests/Makefile
++++ b/dm/gfx/tests/Makefile
+@@ -435,6 +435,11 @@ check_t_view_levels: RUN_ENV = MTL_DEBUG_LAYER=1
+ t_res_commit: t_res_commit.m $(MTL_T_DEP)
+ 	clang $(CFLAGS) -fobjc-arc -o $@ t_res_commit.m $(MTL_T_SRC) $(FW)
+ check_t_res_commit: RUN_ENV = MTL_DEBUG_LAYER=1
++t_res_trace: t_res_trace.m $(MTL_T_DEP)
++	clang $(CFLAGS) -fobjc-arc -o $@ t_res_trace.m $(MTL_T_SRC) $(FW)
++check_t_res_trace: t_res_trace
++	MTL_DEBUG_LAYER=1 DM_RES_TRACE=0 ./t_res_trace
++	MTL_DEBUG_LAYER=1 DM_RES_TRACE=1 ./t_res_trace
+ t_upload_src: t_upload_src.m $(MTL_T_DEP)
+ 	clang $(CFLAGS) -fobjc-arc -o $@ t_upload_src.m $(MTL_T_SRC) $(FW)
+ check_t_upload_src: RUN_ENV = MTL_DEBUG_LAYER=1
+diff --git a/dm/gfx/tests/t_res_trace.m b/dm/gfx/tests/t_res_trace.m
+new file mode 100644
+index 0000000..6915760
+--- /dev/null
++++ b/dm/gfx/tests/t_res_trace.m
+@@ -0,0 +1,97 @@
++// A gated residency commit proves that its begin checkpoint is already readable
++// while the driver has not returned, and that tracing does not change its waits.
++#import "../nvn/nvn_mtl.m"
++
++void *front_metal_layer(void) { return NULL; }
++module_t *module_of(const void *p) { (void)p; return NULL; }
++module_t *g_mod; int g_nmod;
++void svc_thread_dump(void) {}
++uint64_t now_ns(void) { return bp_now(); }
++
++@interface GatedResidency : NSObject
++
++@property (strong) id<MTLResidencySet> delegate;
++@property (strong) dispatch_semaphore_t entered;
++@property (strong) dispatch_semaphore_t releaseCommit;
++- (void)addAllocation:(id<MTLAllocation>)allocation;
++- (void)removeAllocation:(id<MTLAllocation>)allocation;
++- (void)commit;
++
++@end
++
++@implementation GatedResidency
++
++- (void)addAllocation:(id<MTLAllocation>)allocation {
++    [self.delegate addAllocation:allocation];
++}
++
++- (void)removeAllocation:(id<MTLAllocation>)allocation {
++    [self.delegate removeAllocation:allocation];
++}
++
++- (void)commit {
++    dispatch_semaphore_signal(self.entered);
++    dispatch_semaphore_wait(self.releaseCommit, DISPATCH_TIME_FOREVER);
++    [self.delegate commit];
++}
++
++@end
++
++static int checks, failed;
++#define CHECK(label, c) do { checks++; if (!(c)) { failed++; printf("FAIL: %s\n", label); } } while (0)
++
++static int log_has(FILE *log, const char *text) {
++    fflush(stderr);
++    char bytes[32768];
++    ssize_t n = pread(fileno(log), bytes, sizeof(bytes) - 1, 0);
++    if (n < 0) return 0;
++    bytes[n] = 0;
++    return strstr(bytes, text) != NULL;
++}
++
++int main(void) { @autoreleasepool {
++    mtl_init();
++    res_commit();
++    int trace = getenv("DM_RES_TRACE") && atoi(getenv("DM_RES_TRACE")) != 0;
++    FILE *log = tmpfile();
++    if (!log) return 2;
++    fflush(stderr);
++    int saved = dup(STDERR_FILENO);
++    if (saved < 0 || dup2(fileno(log), STDERR_FILENO) < 0) return 2;
++    GatedResidency *gate = [GatedResidency new];
++    gate.delegate = g_res;
++    gate.entered = dispatch_semaphore_create(0);
++    gate.releaseCommit = dispatch_semaphore_create(0);
++    g_res = (id<MTLResidencySet>)gate;
++    id<MTLBuffer> a = [g_dev newBufferWithLength:32u << 20 options:MTLResourceStorageModeShared];
++    res_add(a);
++    dispatch_semaphore_t done = dispatch_semaphore_create(0);
++    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
++        res_commit();
++        dispatch_semaphore_signal(done);
++    });
++    int entered = dispatch_semaphore_wait(gate.entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0;
++    CHECK("commit reaches the gated driver", entered);
++    if (entered) {
++        CHECK("commit has not returned before the gate opens", dispatch_semaphore_wait(done, DISPATCH_TIME_NOW) != 0);
++        CHECK("begin checkpoint is visible before driver return only when enabled", log_has(log, "begin Metal commit") == trace);
++        char metadata[96];
++        snprintf(metadata, sizeof metadata, "shared buffers %llu", (unsigned long long)a.allocatedSize);
++        CHECK("allocation metadata precedes driver return only when enabled", log_has(log, metadata) == trace);
++        CHECK("no completion checkpoint while driver is blocked", !log_has(log, "Metal commit returned"));
++        // Concurrent changes still queue without waiting for the blocked commit.
++        id<MTLBuffer> b = [g_dev newBufferWithLength:4096 options:MTLResourceStorageModeShared];
++        res_add(b);
++        res_remove(b);
++        CHECK("a blocked commit does not drain later queued changes", res_pending());
++    }
++    dispatch_semaphore_signal(gate.releaseCommit);
++    CHECK("commit completes once driver is released", dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0);
++    CHECK("completion checkpoint follows driver return only when enabled", log_has(log, "Metal commit returned") == trace);
++    g_res = gate.delegate;
++    CHECK("tracing preserves actual residency", [g_res containsAllocation:a]);
++    res_remove(a); res_commit();
++    fflush(stderr); dup2(saved, STDERR_FILENO); close(saved); fclose(log);
++    printf("t_res_trace (%s): %d checks, %d failed\n", trace ? "on" : "off", checks, failed);
++    return failed != 0;
++} }
+diff --git a/dm/host/hle_lifecycle.c b/dm/host/hle_lifecycle.c
+index a9e65a0..2f3b3ab 100644
+--- a/dm/host/hle_lifecycle.c
++++ b/dm/host/hle_lifecycle.c
+@@ -106,38 +106,49 @@ __attribute__((weak)) void dm_sdk16_teardown(void) {}
+ __attribute__((weak)) void dm_hid_touch_teardown(void) {}
+ __attribute__((weak)) void dm_fpslock_teardown(void) {}
+ void dm_host_teardown_for_shell(void) {
++    const char *trace_env = getenv("DM_TEARDOWN_TRACE");
++    int trace = trace_env && atoi(trace_env) != 0;
++    // Checkpoints run on the existing teardown thread. A missing end identifies the
++    // wait without a timer thread that might survive a shell framework reset.
++#define SHELL_STEP(call) do { \
++    uint64_t step_start = trace ? now_ns() : 0; \
++    if (trace) LOG("shell teardown begin %s", #call); \
++    call; \
++    if (trace) LOG("shell teardown end %s (%.3f ms)", #call, (now_ns() - step_start) / 1e6); \
++} while (0)
+     if (g_term_src) { dispatch_source_cancel(g_term_src); g_term_src = NULL; }
+-    dm_cheats_exit();
+-    dm_vsync_stop_all();
+-    dm_sf_stop_all();
+-    dm_audio_suspend(1);
+-    dm_audren_stop_all();
+-    dm_movie_stop_all();
+-    dm_codec_video_stop_all();
+-    dm_save_sync_stop();
+-    dm_haptics_apple_shutdown();
+-    dm_guest_clock_wake_teardown();
+-    dm_gfx_quit_begin();
+-    dm_gfx_suspend(1);
+-    dm_threads_park_all();
+-    dm_bigstack_teardown();
+-    dm_audio_stop_all();
+-    dm_haptics_apple_teardown();
+-    dm_switch2_teardown();
+-    dm_audren_teardown_post();
+-    dm_sf_teardown();
+-    dm_movie_teardown_post();
+-    dm_codec_video_teardown_post();
+-    dm_cheats_teardown();
+-    dm_gfx_teardown();
+-    dm_net_teardown();
+-    dm_sdk16_teardown();
+-    dm_hid_touch_teardown();
+-    dm_fpslock_teardown();
+-    dm_msl_trailer_teardown();
+-    dm_fs_teardown();
+-    dm_guest_memory_release(1);
+-    dm_ue_malloc_teardown();
+-    dm_modules_teardown();
++    SHELL_STEP(dm_cheats_exit());
++    SHELL_STEP(dm_vsync_stop_all());
++    SHELL_STEP(dm_sf_stop_all());
++    SHELL_STEP(dm_audio_suspend(1));
++    SHELL_STEP(dm_audren_stop_all());
++    SHELL_STEP(dm_movie_stop_all());
++    SHELL_STEP(dm_codec_video_stop_all());
++    SHELL_STEP(dm_save_sync_stop());
++    SHELL_STEP(dm_haptics_apple_shutdown());
++    SHELL_STEP(dm_guest_clock_wake_teardown());
++    SHELL_STEP(dm_gfx_quit_begin());
++    SHELL_STEP(dm_gfx_suspend(1));
++    SHELL_STEP(dm_threads_park_all());
++    SHELL_STEP(dm_bigstack_teardown());
++    SHELL_STEP(dm_audio_stop_all());
++    SHELL_STEP(dm_haptics_apple_teardown());
++    SHELL_STEP(dm_switch2_teardown());
++    SHELL_STEP(dm_audren_teardown_post());
++    SHELL_STEP(dm_sf_teardown());
++    SHELL_STEP(dm_movie_teardown_post());
++    SHELL_STEP(dm_codec_video_teardown_post());
++    SHELL_STEP(dm_cheats_teardown());
++    SHELL_STEP(dm_gfx_teardown());
++    SHELL_STEP(dm_net_teardown());
++    SHELL_STEP(dm_sdk16_teardown());
++    SHELL_STEP(dm_hid_touch_teardown());
++    SHELL_STEP(dm_fpslock_teardown());
++    SHELL_STEP(dm_msl_trailer_teardown());
++    SHELL_STEP(dm_fs_teardown());
++    SHELL_STEP(dm_guest_memory_release(1));
++    SHELL_STEP(dm_ue_malloc_teardown());
++    SHELL_STEP(dm_modules_teardown());
+     LOG("host torn down for shell game switch");
++#undef SHELL_STEP
+ }
+diff --git a/docs/reference/rendering.md b/docs/reference/rendering.md
+index 93247c5..7da4fcd 100644
+--- a/docs/reference/rendering.md
++++ b/docs/reference/rendering.md
+@@ -760,6 +760,14 @@ The replay on Metal (`dm/gfx/nvn/nvn_mtl.m`) and the Vulkan and OpenGL layers. E
+ - **Found on:** [Super Smash Bros. Ultimate](../../dm/games/01006A800016E000/README.md) (13.0.5, `DM_WINDOW=1`).
+ - **Check:** Breath of the Wild windowed with the change: its title, 60 fps, no GPU error.
+ 
++### A residency commit does not return on an iPad
++
++- **Symptom:** a black picture after preparation, sometimes only after returning to the library and starting again. Quitting may leave the process unable to finish exiting, and the next app launch stays black.
++- **Cause:** open. A Time Profiler initial stackshot on an M2 iPad Pro (iPadOS 27.0.1, 24A446) places the NVN replay thread in `IOGPUResourceGroupUpdateResources`, through `-[IOGPUMetalResidencySet commit]`, `res_commit`, `gmem_map` and `encode_args`. The guest main thread waits in `mtl_reg_tex` for `g_rmu`, held by that replay path. UIKit's main thread is in its run loop. This locates the wait, but does not explain why the driver has not returned. It also occurred on a first launch after reboot with `DM_GUEST_FILE_PUNCH=0`, so that switch is not a sufficient workaround. A similar residency wait is described in [PR #2098](https://github.com/seedds/nxnative/pull/2098) for another game and device, without establishing a shared cause.
++- **Fix:** none confirmed. `DM_RES_TRACE=1` adds synchronous, numbered checkpoints before the commit mutex, after acquiring it, around applying allocations, and around Metal's commit. Each batch records allocation counts and bytes and the submitted/completed fences. Large batches also name their eight largest added allocations, with shared buffer addresses but no buffer contents. `DM_TEARDOWN_TRACE=1` records the begin and end of every existing shell teardown step. Both are off by default, retain the existing synchronization and teardown order, and create no watchdog threads. A missing end checkpoint identifies the next wait to inspect, not a recovery action.
++- **Check:** `check_t_res_trace` gates a real residency set's commit and checks that the begin and batch lines can be read before the call returns, completion appears only afterwards, concurrent changes still queue, and actual residency is preserved, with tracing both on and off. `check_t_res_commit` exercises the existing serialization. Hardware diagnosis is ongoing and does not establish a fix or gameplay compatibility.
++- **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game), update v131072 in the personal iPad shell, engine `68179b6d470e`, shader chain `19d183a2b462`, 2026-11-18. The local experimental data set has three known damaged textures, whose relationship to this wait is unproven.
++
+ ### Naming the shaders of a GPU fault
+ 
+ - **Symptom:** `kIOGPUCommandBufferCallbackErrorPageFault` or `kIOGPUCommandBufferCallbackErrorHang` on a command buffer, and nothing says which draw or dispatch caused it; `DM_RES_CHECK=1` reports no `missing residency`.

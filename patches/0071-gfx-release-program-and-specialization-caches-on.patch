@@ -1,0 +1,340 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jorge Trigger <lordchronotrigger@gmail.com>
+Date: Wed, 18 Nov 2026 20:01:40 +0100
+Subject: [PATCH] gfx: release program and specialization caches on teardown
+
+The last lookup and last draw retain shader programs independently of the
+serial table. Release those owners and their cache keys after work drains,
+along with the independent positive and negative border-specialization map.
+Two-session Metal tests fail before the change and verify release, serial
+reuse and rendered pixels after it. This does not establish the cause of
+the iPad kernel wait, and has not changed the installed diagnostic candidate.
+
+Upstream-Status: pending
+Reason: Release independently retained program and shader owners before a shell session reset
+Issue: seedds/nxnative#2098 (related hang only, causality unproven)
+---
+ dm/games/0400486024DEC000/README.md |   1 +
+ dm/gfx/nvn/nvn_mtl.m                |  33 ++++--
+ dm/gfx/tests/Makefile               |  11 ++
+ dm/gfx/tests/t_session_programs.m   | 175 ++++++++++++++++++++++++++++
+ docs/reference/memory.md            |   8 ++
+ 5 files changed, 217 insertions(+), 11 deletions(-)
+ create mode 100644 dm/gfx/tests/t_session_programs.m
+
+diff --git a/dm/games/0400486024DEC000/README.md b/dm/games/0400486024DEC000/README.md
+index c738a7d..8e88382 100644
+--- a/dm/games/0400486024DEC000/README.md
++++ b/dm/games/0400486024DEC000/README.md
+@@ -133,6 +133,7 @@ Its 37 kernels that correct samples, NDSR's network among them, gave about 0.25
+ 
+ - Open: [a residency commit does not return on an iPad](../../../docs/reference/rendering.md#a-residency-commit-does-not-return-on-an-ipad). A device stackshot identifies the replay thread's driver call and the guest main thread waiting behind it. Opt-in residency and teardown checkpoints gather the next failure, without changing rendering or claiming a fix.
+ - [Metal resource caches keep ownership after session teardown](../../../docs/reference/memory.md#metal-resource-caches-keep-ownership-after-session-teardown): corrected with a two-session Metal regression on the Mac. The iOS shell's raw data restore loses unreleased cache references. This is a separate ownership defect, with no evidence that it causes the iPad's residency-commit hang, whose device retest remains open.
++- [Last-program and specialization caches retain objects after teardown](../../../docs/reference/memory.md#last-program-and-specialization-caches-retain-objects-after-teardown): follow-up for the independent last-lookup, last-draw and border-specialization owners. Synthetic two-session Mac tests check release, serial reuse and actual red/green rendering. No new iPad validation, measured Zelda bytes or attribution of the kernel wait or slow exit to these owners.
+ 
+ - [GPU frame captures need pipelines built through the device](../../../docs/reference/shaders.md#gpu-frame-captures-need-pipelines-built-through-the-device): fixed for every game ([PR #2688](https://github.com/seedds/nxnative/pull/2688)). An M1 session with `MTL_CAPTURE_ENABLED=0` left set ran without the Metal 4 pipelines: `hybrid pipelines off`, 467 pipeline stalls of about 170 ms and one 84 s freeze. The host now asks Metal whether the run can capture.
+ - [A scene that does not fit the shorter hold probed against another scene's GPU time](../../../docs/reference/frame-rate.md#a-scene-that-does-not-fit-the-shorter-hold-probed-against-another-scenes-gpu-time): fixed in the frame step for every game. Hyrule Field at night on an M2 Pro (22 failed probes a minute, 159 frames at 20 fps, PR [#2611](https://github.com/seedds/nxnative/pull/2611)) and Kokiri Forest at each turn of the camera on an Android port. On an M4 Pro at render scale 1.333, standing at the Hyrule Field save point: 9 and 13 failed probes a run before, 2 after; the M2 Pro retest is open.
+diff --git a/dm/gfx/nvn/nvn_mtl.m b/dm/gfx/nvn/nvn_mtl.m
+index aa3d0c7..fcfe8c0 100644
+--- a/dm/gfx/nvn/nvn_mtl.m
++++ b/dm/gfx/nvn/nvn_mtl.m
+@@ -6833,14 +6833,17 @@ static void draw_gs_check(NvProg *pr) {
+     return nil;
+ }
+ static void up_mfx_read_color(NvShader *cs, const NVNshaderData *sd);
++// Submit-thread last lookup. Teardown clears its owner and keys before the shell resets framework storage.
++static const prog_t *g_prog_last_ptr;
++static uint64_t g_prog_last_serial, g_prog_last_gen;
++static NvProg *g_prog_last;
+ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // Called only on the submit thread
+     prog_t *p = (prog_t *)cp;
+     if (!p) return nil;   // no program bound: nil, as the callers that test S.prog first get (draw_'s passdump line tests it, the lines after it did not)
+-    static const prog_t *lp; static uint64_t lser, lgen; static NvProg *lpr;   // Last result: same object, same serial and unchanged serial table means it is used directly
+     uint64_t gen = g_ser_gen;
+-    if (p == lp && p->serial == lser && gen == lgen && lpr) return lpr;
++    if (p == g_prog_last_ptr && p->serial == g_prog_last_serial && gen == g_prog_last_gen && g_prog_last) return g_prog_last;
+     __unsafe_unretained NvProg *have = p->serial ? serial_get(p->serial) : nil;
+-    if (have) { lp = p; lser = p->serial; lgen = gen; lpr = have; return have; }
++    if (have) { g_prog_last_ptr = p; g_prog_last_serial = p->serial; g_prog_last_gen = gen; g_prog_last = have; return have; }
+     shmap_load();
+     NvProg *o = [NvProg new];
+     for (unsigned i = 0; i < p->nstage; i++) {
+@@ -14380,6 +14383,10 @@ static int skip_fs_draw(NvProg *pr) {
+     return 0;
+ }
+ static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
++// The draw cache can keep an entire program's shader buffers alive after the serial owner is cleared.
++static NvProg *g_draw_pr;
++static uint64_t g_draw_ps_pass;
++static int g_draw_pull, g_draw_border;
+ static void draw_(const p_draw *dw, const p_draw_idx *di) {
+     g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
+     if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
+@@ -14487,17 +14494,17 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
+     // The pipeline depends only on (program, render pass targets, blend / color / write mask / multisample state, vertex layout): if these did not change, reuse the previous one
+     // … and on whether a sampler the draw binds has a border colour twin (pso_key.border), which follows the bindings: binding a sampler, or a handle a uniform buffer holds,
+     // does not mark the pipeline dirty, so the draw compares it with the last pipeline's (found by the iPhone port, PR #1073). No look at the bindings while no registered sampler has a twin
+-    static int cur_border; int border = prog_border(pr);
+-    static id<MTLRenderPipelineState> cur_ps; static NvProg *cur_pr; static uint64_t cur_ps_pass; static int cur_pull;   // cur_pull: a hybrid (pulling) pipeline, asked for again at the next draw
++    int border = prog_border(pr);
++    static id<MTLRenderPipelineState> cur_ps;   // g_draw_pull: a hybrid (pulling) pipeline, asked for again at the next draw
+     if (g_fb_tseq == g_draw_seq && g_fb_tfn) { g_pso_lmap = g_fb_tlmap; g_pso_fsfn = g_fb_tfn; g_pso_fz = g_fb_tdesc; g_pso_dirty = 1; }   // same-pass feedback read from the tile (fb_tile_plan)
+-    if (g_mtk.on) { cur_ps = mtk_pso(pr); cur_pull = 0; cur_pr = nil; if (!cur_ps) { g_mtk.miss = 1; return; } }   // a task / mesh draw (mesh_tasks_draw)
+-    else if (g_geo_mesh.on) { cur_ps = geo_mesh_pso(pr); cur_pull = 1; cur_pr = nil; if (!cur_ps) { g_geo_mesh.miss = 1; return; } }   // a mesh draw (geo_mesh_draw): pulls its streams; the next draw fetches its own pipeline; none yet: the compute path draws
+-    else if (g_wl.on) { cur_ps = wl_pso(pr); cur_pull = 1; cur_pr = nil; if (!cur_ps) { g_wl.miss = 1; return; } }   // a wide line drawn as quads (nvn_wline.inc): pulls its streams; the next draw fetches its own pipeline
+-    else if (g_pso_dirty || pr != cur_pr || cur_ps_pass != g_pass.serial || border != cur_border) { g_pso_amp = g_sm_pass; cur_ps = pso_get(pr, nil); g_pso_amp = 0; cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; cur_border = border; g_pso_dirty = !cur_ps || cur_pull; }
++    if (g_mtk.on) { cur_ps = mtk_pso(pr); g_draw_pull = 0; g_draw_pr = nil; if (!cur_ps) { g_mtk.miss = 1; return; } }   // a task / mesh draw (mesh_tasks_draw)
++    else if (g_geo_mesh.on) { cur_ps = geo_mesh_pso(pr); g_draw_pull = 1; g_draw_pr = nil; if (!cur_ps) { g_geo_mesh.miss = 1; return; } }   // a mesh draw (geo_mesh_draw): pulls its streams; the next draw fetches its own pipeline; none yet: the compute path draws
++    else if (g_wl.on) { cur_ps = wl_pso(pr); g_draw_pull = 1; g_draw_pr = nil; if (!cur_ps) { g_wl.miss = 1; return; } }   // a wide line drawn as quads (nvn_wline.inc): pulls its streams; the next draw fetches its own pipeline
++    else if (g_pso_dirty || pr != g_draw_pr || g_draw_ps_pass != g_pass.serial || border != g_draw_border) { g_pso_amp = g_sm_pass; cur_ps = pso_get(pr, nil); g_pso_amp = 0; g_draw_pull = g_pso_pull; g_draw_pr = pr; g_draw_ps_pass = g_pass.serial; g_draw_border = border; g_pso_dirty = !cur_ps || g_draw_pull; }
+     if (!cur_ps && g_sm_pass) {   // a draw whose amplified pipeline is not built yet (sm_amp_get queued it): the slice-merged pass ends and the draw opens a pass of its own
+         g_sm_nwait++; PD("M %llu slice-merged pass: no amplified pipeline yet for vertex %s fragment %s; split here", g_stat_pass, pr->sh[0] ? pr->sh[0]->key : "-", pr->sh[1] ? pr->sh[1]->key : "-");
+         rp_end(); en = rp_begin_ex(0); if (!en) return;
+-        cur_ps = pso_get(pr, nil); cur_pull = g_pso_pull; cur_pr = pr; cur_ps_pass = g_pass.serial; cur_border = border; g_pso_dirty = !cur_ps || cur_pull; }
++        cur_ps = pso_get(pr, nil); g_draw_pull = g_pso_pull; g_draw_pr = pr; g_draw_ps_pass = g_pass.serial; g_draw_border = border; g_pso_dirty = !cur_ps || g_draw_pull; }
+     uint32_t raster_mask = draw_color_writes(pr);   // Capture the physical mapping before resetting the merged pipeline state.
+     if (g_pso_lmap) { g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz); g_pso_dirty = 1; }   // The next draw fetches again according to its own situation
+     __unsafe_unretained id<MTLRenderPipelineState> ps = cur_ps;
+@@ -14555,7 +14562,7 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
+       if (!(g_ed.ok & ED_BIAS) || memcmp(g_ed.bias, bi, sizeof bi)) { enc_r_depth_bias(en, bi[0], bi[1], bi[2]); memcpy(g_ed.bias, bi, sizeof bi); g_ed.ok |= ED_BIAS; }
+       if (!(g_ed.ok & ED_CLIP) || g_ed.clip != cl) { enc_r_depth_clip(en, cl); g_ed.clip = cl; g_ed.ok |= ED_CLIP; }
+       if (!(g_ed.ok & ED_BLEND) || memcmp(g_ed.blend, S.blend_color, sizeof g_ed.blend)) { enc_r_blend_color(en, S.blend_color[0], S.blend_color[1], S.blend_color[2], S.blend_color[3]); memcpy(g_ed.blend, S.blend_color, sizeof g_ed.blend); g_ed.ok |= ED_BLEND; } }
+-    if (cur_pull) { pull_bind(en); g_hy_draws += !g_geo_mesh.on && !g_wl.on; }   // a pulling pipeline reads the streams itself (no conversion either: dm_fetch decodes every format)
++    if (g_draw_pull) { pull_bind(en); g_hy_draws += !g_geo_mesh.on && !g_wl.on; }   // a pulling pipeline reads the streams itself (no conversion either: dm_fetch decodes every format)
+     else {
+         int bad = bind_vbufs(en, pr->sh[0] ? &pr->sh[0]->rf : NULL);
+         if (bad >= 0) { RED_ONCE(158, "vertex stream %d's buffer %#llx is in no memory pool; draw skipped", bad, (unsigned long long)S.vbuf[bad].address); return; }
+@@ -17903,6 +17910,9 @@ void dm_gfx_teardown(void) { @autoreleasepool {
+     g_tu_n = g_tu_bytes = g_tu_serials = g_tu_pinned = g_tu_ns = g_tu_passes = 0;
+     os_unfair_lock_unlock(&g_tu_lk);
+ 
++    // All submit, encode and background pipeline work is drained above. These last-result owners are independent of the serial table.
++    g_prog_last = nil; g_prog_last_ptr = NULL; g_prog_last_serial = g_prog_last_gen = 0;
++    g_draw_pr = nil; g_draw_ps_pass = 0; g_draw_pull = g_draw_border = 0;
+     own_teardown();
+ 
+     pthread_mutex_lock(&g_smu);
+@@ -17934,6 +17944,7 @@ void dm_gfx_teardown(void) { @autoreleasepool {
+ 
+     os_unfair_lock_lock(&g_fn4_lock); g_fn4 = nil; os_unfair_lock_unlock(&g_fn4_lock);
+     os_unfair_lock_lock(&g_fn_dev_lock); g_fn_dev = nil; os_unfair_lock_unlock(&g_fn_dev_lock);
++    os_unfair_lock_lock(&g_fn_off_lock); g_fn_off = nil; os_unfair_lock_unlock(&g_fn_off_lock);
+     os_unfair_lock_lock(&g_mfx_word_lock); g_mfx_word = nil; os_unfair_lock_unlock(&g_mfx_word_lock);
+     g_sp_gather_ps = nil; g_sp_gather_failed = 0;
+     g_bc_alias_st = nil; g_bc_alias_n = 0;
+diff --git a/dm/gfx/tests/Makefile b/dm/gfx/tests/Makefile
+index 0c1d850..acd7705 100644
+--- a/dm/gfx/tests/Makefile
++++ b/dm/gfx/tests/Makefile
+@@ -757,3 +757,14 @@ check_t_bc_cpu: RUN_ENV = MTL_DEBUG_LAYER=1
+ t_session_buffers: t_session_buffers.m $(MTL_T_DEP)
+ 	clang $(CFLAGS) -fobjc-arc -o $@ t_session_buffers.m $(MTL_T_SRC) $(FW)
+ check_t_session_buffers: RUN_ENV = MTL_DEBUG_LAYER=1
++
++# Program and border-specialization ownership through two real Metal backend sessions.
++t_session_programs: t_session_programs.m $(MTL_T_DEP)
++	clang $(CFLAGS) -fobjc-arc -o $@ t_session_programs.m $(MTL_T_SRC) $(FW)
++.PHONY: check_t_session_programs
++check_t_session_programs: t_session_programs
++	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_session_programs lookup
++	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_session_programs serial
++	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_session_programs draw
++	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=1 ./t_session_programs draw
++	MTL_DEBUG_LAYER=1 DM_NVN_ENC_THREAD=0 ./t_session_programs border
+diff --git a/dm/gfx/tests/t_session_programs.m b/dm/gfx/tests/t_session_programs.m
+new file mode 100644
+index 0000000..376c0a8
+--- /dev/null
++++ b/dm/gfx/tests/t_session_programs.m
+@@ -0,0 +1,175 @@
++// Last-program and border-specialization owners must end before the shell's raw framework reset.
++// Two real backend starts deliberately reuse descriptor addresses, serials and serial-table generations.
++#include "../nvn/nvn_mtl.m"
++
++void *front_metal_layer(void) { return NULL; }
++module_t *module_of(const void *p) { (void)p; return NULL; }
++module_t *g_mod; int g_nmod;
++void svc_thread_dump(void) {}
++uint64_t now_ns(void) { return bp_now(); }
++
++static int checks, failed;
++#define CHECK(c, label) do { checks++; if (!(c)) { failed++; fprintf(stderr, "FAIL: %s\n", label); } } while (0)
++
++static size_t buffer_bytes(NvProg *p) {
++    uintptr_t seen[12] = {0}; size_t count = 0, bytes = 0;
++    for (int s = 0; p && s < 6; s++) {
++        NvShader *sh = p->sh[s]; if (!sh) continue;
++        id<MTLBuffer> buffers[] = {sh->c1buf, sh->ab_buf};
++        for (int b = 0; b < 2; b++) {
++            id<MTLBuffer> buffer = buffers[b]; if (!buffer) continue;
++            uintptr_t ptr = (uintptr_t)(__bridge void *)buffer; int duplicate = 0;
++            for (size_t i = 0; i < count; i++) duplicate |= seen[i] == ptr;
++            if (!duplicate) { seen[count++] = ptr; bytes += buffer.length; }
++        }
++    }
++    return bytes;
++}
++
++static NvProg *make_program(id<MTLLibrary> lib) {
++    NvProg *p = [NvProg new];
++    for (int s = 0; s < 2; s++) {
++        NvShader *sh = [NvShader new]; sh->stage = s; p->sh[s] = sh;
++        snprintf(sh->key, sizeof sh->key, "session%d_b", s);
++        if (lib) sh->fn = [lib newFunctionWithName:s ? @"f" : @"v"];
++        if (s == 1) { sh->rf.color_known = 1; sh->rf.color_mask = 1; }
++        sh->rf.c1_len = 16; sh->rf.c1 = calloc(1, 16); c1_store(sh);
++        // No argument encoder in these simple shaders. Exercise ownership of production arena storage explicitly.
++        id<MTLBuffer> ab; sh->ab_off = arena_alloc(256, &ab); sh->ab_buf = ab; sh->ab_gpu = ab.gpuAddress + sh->ab_off;
++    }
++    return p;
++}
++
++static void replace_lookup(void) {
++    static prog_t sentinel = {.serial = 991003};
++    NvProg *p = [NvProg new]; serial_put(sentinel.serial, p);
++    CHECK(prog_get(&sentinel) == p, "replace the lookup owner to isolate the draw owner");
++}
++
++static void render_program(prog_t *pg, int number) {
++    tex_t t = {.magic = MAGIC('T', 'E', 'X', 0), .serial = 991002};
++    t.d = (nvn_texdesc){.target = NVN_TEXTURE_TARGET_2D, .format = NVN_FORMAT_RGBA8, .width = 8, .height = 8, .depth = 1, .levels = 1, .samples = 1};
++    MTLTextureDescriptor *desc = tex_desc(&t, 0); desc.storageMode = MTLStorageModeShared;
++    id<MTLTexture> out = [g_dev newTextureWithDescriptor:desc]; res_add(out); mtl_tex_init(&t); serial_put(t.serial, out);
++    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
++    R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &t; R.clear_c[0] = 1; R.cc[0] = MTLClearColorMake(0, 0, 0, 0);
++    S.prog = pg; S.ds.dt = S.ds.dw = S.ds.st = 0; S.poly.cull = 0; S.color.blend_en = 0; S.chmask.mask = 0xffff;
++    p_draw command = {.prim = 4, .count = 3, .instances = 1};
++    draw(&command, NULL);
++    // The second draw takes the same-pass last-program/pipeline fast path.
++    uint64_t pass = g_pass.serial; draw(&command, NULL);
++    CHECK(g_pass.serial == pass, "the second draw reuses this session's render pass");
++    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "real rendering completes");
++    CHECK(!mtl_last_commit_error(), "real rendering has no GPU error");
++    uint8_t pixels[8 * 8 * 4]; [out getBytes:pixels bytesPerRow:8 * 4 fromRegion:MTLRegionMake2D(0, 0, 8, 8) mipmapLevel:0];
++    int k = (4 * 8 + 4) * 4;
++    CHECK(number == 1 ? pixels[k] > 200 && pixels[k + 1] < 10 : pixels[k] < 10 && pixels[k + 1] > 200,
++          "pixels use the current session's shader, red then green");
++    replace_lookup();
++    mtl_tex_release(&t);
++}
++
++static void program_session(const char *mode, int number) {
++    int render = !strcmp(mode, "draw"), mutate = !strcmp(mode, "serial");
++    static prog_t pg = {.serial = 991001};
++    static uint64_t first_generation;
++    __weak NvProg *wp;
++    __weak NvShader *wv;
++    __weak NvShader *wf;
++    __weak id<MTLBuffer> wc;
++    __weak id<MTLBuffer> wa;
++    @autoreleasepool {
++        mtl_init();
++        CHECK(g_dev && g_res, "each session starts a real Metal backend and residency set");
++        CHECK(serial_get(pg.serial) == nil, "the serial owner table is empty after restart");
++        @autoreleasepool {
++            id<MTLLibrary> lib = nil;
++            if (render) {
++                NSError *error = nil;
++                NSString *source = [NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\n"
++                    "vertex float4 v(uint i [[vertex_id]]){float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return float4(p[i],.5,1);}\n"
++                    "fragment float4 f(){return float4(%d,%d,0,1);}\n", number == 1, number == 2];
++                lib = [g_dev newLibraryWithSource:source options:nil error:&error];
++                CHECK(lib != nil, "synthetic render library compiles");
++                if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return; }
++            }
++            NvProg *p = make_program(lib);
++            wp = p; wv = p->sh[0]; wf = p->sh[1]; wc = p->sh[0]->c1buf; wa = p->sh[0]->ab_buf;
++            CHECK(p->sh[0]->c1buf == p->sh[1]->c1buf && p->sh[0]->ab_buf == p->sh[1]->ab_buf, "the fixture shares both buffers");
++            CHECK(buffer_bytes(p) == 8u << 20, "deduplicate the fixture's two 4 MiB buffers");
++            serial_put(pg.serial, p);
++            if (number == 1) first_generation = g_ser_gen;
++            CHECK(g_ser_gen == first_generation, "the restarted serial table repeats the first session's generation");
++            CHECK(prog_get(&pg) == p, "reused address, serial and generation resolve to the new program");
++            CHECK(prog_get(&pg) == p, "same-session cached lookup returns the current program");
++            if (mutate) {
++                NvProg *other = [NvProg new];
++                serial_put(pg.serial, other);
++                CHECK(prog_get(&pg) == other, "a generation change replaces the cached serial's object");
++                serial_put(pg.serial + 1, p); pg.serial++;
++                CHECK(prog_get(&pg) == p, "the same descriptor address can bind another serial");
++                pg.serial--; CHECK(prog_get(&pg) == other, "restoring its serial restores that serial's object");
++                serial_put(pg.serial, p); CHECK(prog_get(&pg) == p, "final lookup owns the fixture under its original serial");
++            }
++            if (render) render_program(&pg, number);
++            res_commit();
++            CHECK([g_res containsAllocation:p->sh[0]->c1buf] && [g_res containsAllocation:p->sh[0]->ab_buf], "current shader buffers belong to the current residency set");
++        }
++        dm_gfx_teardown();
++    }
++    CHECK(wp == nil, "teardown releases the last program");
++    CHECK(wv == nil && wf == nil, "teardown releases both shaders");
++    CHECK(wc == nil && wa == nil, "teardown releases the constant bank and argument arena");
++    CHECK(buffer_bytes(wp) == 0, "no fixture buffer bytes remain reachable through the program");
++    CHECK(g_dev == nil && g_res == nil, "the backend and residency owner have stopped");
++    printf("program session %s/%d: %d checks, %d failed so far\n", mode, number, checks, failed);
++}
++
++static void border_session(int number) {
++    __weak id<MTLLibrary> wl;
++    __weak MTL4FunctionDescriptor *wd;
++    __weak MTL4FunctionDescriptor *wn;
++    __weak FnOff *wo;
++    __weak FnOff *wno;
++    @autoreleasepool {
++        mtl_init();
++        CHECK(g_dev && g_res, "border session starts a real backend");
++        CHECK(g_fn_off.count == 0, "the border cache starts empty in each session");
++        @autoreleasepool {
++            NSError *error = nil;
++            NSString *source = [NSString stringWithFormat:@"#include <metal_stdlib>\nusing namespace metal;\n"
++                "constant bool dm_border_off [[function_constant(%u)]];\n"
++                "kernel void probe(device uint *out [[buffer(0)]]){out[0]=dm_border_off ? %uu : 3u;}\n"
++                "kernel void plain(device uint *out [[buffer(0)]]){out[0]=1u;}\n", DMSH_BORDER_FC, 6 + number];
++            id<MTLLibrary> lib = [g_dev newLibraryWithSource:source options:nil error:&error];
++            CHECK(lib != nil, "synthetic border library compiles");
++            if (!lib) { fprintf(stderr, "%s\n", error.localizedDescription.UTF8String); return; }
++            wl = lib;
++            id<MTLFunction> f = fn4_note([lib newFunctionWithName:@"probe"], lib, @"probe", nil);
++            wd = fn4_of(f); FnOff *off = fn_off(f); wo = off;
++            CHECK(off && off->d4 && !off->none, "production helper records the supported specialization");
++            CHECK(fn_off(f) == off, "repeated lookup returns the same specialization record");
++            id<MTLFunction> no = fn4_note([lib newFunctionWithName:@"plain"], lib, @"plain", nil);
++            wn = fn4_of(no); CHECK(fn_off(no) == nil, "a function without the border constant has no variant");
++            FnOff *none = [g_fn_off objectForKey:fn4_of(no)]; wno = none;
++            CHECK(none && none->none, "the negative lookup is cached");
++            CHECK(fn_off(no) == nil && g_fn_off.count == 2, "repeated lookups keep exactly two descriptor-keyed entries");
++            CHECK(fn4_of_b(f, 1) == off->d4 && fn4_of_b(f, 0) == wd, "the selector preserves original and specialized descriptors");
++        }
++        dm_gfx_teardown();
++    }
++    CHECK(g_fn_off == nil, "teardown drops the border cache owner");
++    CHECK(wd == nil && wn == nil && wo == nil && wno == nil, "teardown releases positive and negative entries and descriptor keys");
++    CHECK(wl == nil, "teardown releases the synthetic library's descriptor ownership");
++    printf("border session %d: %d checks, %d failed so far\n", number, checks, failed);
++}
++
++int main(int argc, char **argv) {
++    if (argc != 2 || (strcmp(argv[1], "lookup") && strcmp(argv[1], "serial") && strcmp(argv[1], "draw") && strcmp(argv[1], "border"))) return 2;
++    setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_PSO_MANIFEST", "off", 1);
++    for (int n = 1; n <= 2; n++) {
++        if (!strcmp(argv[1], "border")) border_session(n); else program_session(argv[1], n);
++    }
++    printf("t_session_programs %s: %d checks, %d failed\n", argv[1], checks, failed);
++    return failed != 0;
++}
+diff --git a/docs/reference/memory.md b/docs/reference/memory.md
+index 95857fb..cbf39a6 100644
+--- a/docs/reference/memory.md
++++ b/docs/reference/memory.md
+@@ -635,3 +635,11 @@ The guest address space, heaps, pools, virtual address memory and the allocators
+ - **Fix:** expose the resource caches to `dm_gfx_teardown`, release them after the graphics queues and presentation workers have drained, and clear their cached GPU addresses and resource IDs. This covers the zero-fill and vertex fallback buffers, dummy buffer and textures, support buffer, zero constant bank, atomic write sinks, dummy sampler and raw presentation views. Pipeline and library caches require a separate audit.
+ - **Check:** `t_session_buffers` creates resources through the production helpers in two real Metal sessions, checks residency and GPU IDs, and uses weak references after both teardown and autorelease-pool drains to verify release. It does not run UIKit or the shell's raw segment restore, render the game, or reproduce the iPad kernel wait. `t_zero_depth` checks the zero-fill helper's GPU result separately.
+ - **Found on:** while investigating [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game) on an M2 iPad Pro with iPadOS 27.0.1. The ownership defect is reproduced on an M4 Max Mac. Its contribution to [the iPad residency-commit hang](rendering.md#a-residency-commit-does-not-return-on-an-ipad) is unproven, and that hang remains open.
++
++### Last-program and specialization caches retain objects after teardown
++
++- **Symptom:** the last looked-up or drawn program, its shaders and their constant/argument buffers survive `dm_gfx_teardown`. Border-specialization descriptor keys and records can also survive. Restarting the backend without a raw framework reset can return the previous program when its descriptor address, serial and serial-table generation repeat.
++- **Cause:** `prog_get` and `draw_` held separate function-local strong program references that clearing the serial owner table and shader cache could not release. `g_fn_off` separately held descriptor keys and positive or negative specialization records after `g_fn4` was cleared. The iOS shell's raw data restore does not execute ARC releases, so losing those pointers leaks ownership. Reuse of the old pointer across that raw restore is not established.
++- **Fix:** expose the two program references and their lookup/pass metadata to teardown, clear them after submit, encode and pipeline work drains, and release `g_fn_off` under its lock. Other pipeline, library and feedback caches are outside this change.
++- **Check:** `make -C dm/gfx/tests GAME=<id> check_t_session_programs`, on a Mac with Metal API Validation. Each case starts the production backend twice without a simulated shell reset. Weak references check program, shader, buffer, descriptor and specialization release. Lookup cases reuse descriptor addresses, serials and generations and check serial-table replacement. Rendering draws red pixels in the first session and green in the second, with and without the encode thread, using the production draw and submission paths. The two shaders share a 4 MiB constant bank and 4 MiB argument arena, counted once per object. These 8 MiB are fixture storage, not measured Zelda retention. The simple shaders have no argument encoder, so their argument-buffer field is attached explicitly to production arena storage. Border cases exercise both supported and unsupported specializations and a fresh map in the second session.
++- **Found on:** while following up [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md#found-on-this-game)'s iPad investigation, reproduced with synthetic programs on an M4 Max Mac. No new iPad test or game run was performed for this change. It does not reproduce or establish the cause of [the residency-commit kernel wait](rendering.md#a-residency-commit-does-not-return-on-an-ipad), the later slow exit, or the game's measured memory growth between sessions. Mapped game-library retention and UIKit/`SegSnap` execution are not covered.
